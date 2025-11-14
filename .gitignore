@@ -1,0 +1,8 @@
+config.json
+config.py
+
+__pycache__
+node_modules
+chroma_db
+logs
+development_log.md
