@@ -56,180 +56,6 @@ def extract_paragraphs_xml(paragraphs: List[Paragraph]) -> List[str]:
     return [extract_paragraph_xml(para) for para in paragraphs]
 
 
-def get_paragraphs_before_table(
-    doc: DocumentType, table_index: int, count: int = 3
-) -> List[str]:
-    """
-    获取表格前面的段落文本
-
-    Args:
-        doc: Document对象
-        table_index: 表格在文档中的索引位置
-        count: 需要获取的段落数量，默认3个
-
-    Returns:
-        段落文本列表
-    """
-    paragraphs = []
-
-    # 获取文档中的所有表格
-    tables = doc.tables
-    if table_index >= len(tables):
-        return paragraphs
-
-    # 获取目标表格的XML元素
-    target_table_elem = tables[table_index]._tbl
-
-    # 遍历文档body中的所有元素，找到目标表格前面的段落
-    body = doc.element.body
-    para_texts = []
-
-    for elem in body:
-        if elem == target_table_elem:
-            # 找到目标表格，停止收集
-            break
-        elif isinstance(elem, CT_P):
-            # 这是一个段落元素，提取文本
-            para_text = ""
-            # 遍历段落中的所有文本节点
-            for t_elem in elem.iter():
-                if t_elem.tag.endswith("}t"):  # w:t 标签
-                    if t_elem.text:
-                        para_text += t_elem.text
-            if para_text.strip():
-                para_texts.append(para_text.strip())
-
-    # 取最后count个段落
-    start_idx = max(0, len(para_texts) - count)
-    paragraphs = para_texts[start_idx:]
-
-    return paragraphs
-
-
-def get_paragraphs_after_table(
-    doc: DocumentType, table_index: int, count: int = 1
-) -> List[str]:
-    """
-    获取表格后面的段落文本
-
-    Args:
-        doc: Document对象
-        table_index: 表格在文档中的索引位置
-        count: 需要获取的段落数量，默认1个
-
-    Returns:
-        段落文本列表
-    """
-    paragraphs = []
-
-    # 获取文档中的所有表格
-    tables = doc.tables
-    if table_index >= len(tables):
-        return paragraphs
-
-    # 获取目标表格的XML元素
-    target_table_elem = tables[table_index]._tbl
-
-    # 遍历文档body中的所有元素，找到目标表格后面的段落
-    body = doc.element.body
-    para_texts = []
-    found_table = False
-
-    for elem in body:
-        if elem == target_table_elem:
-            # 找到目标表格，开始收集后面的段落
-            found_table = True
-            continue
-        elif found_table and isinstance(elem, CT_P):
-            # 这是一个段落元素，提取文本
-            para_text = ""
-            # 遍历段落中的所有文本节点
-            for t_elem in elem.iter():
-                if t_elem.tag.endswith("}t"):  # w:t 标签
-                    if t_elem.text:
-                        para_text += t_elem.text
-            if para_text.strip():
-                para_texts.append(para_text.strip())
-                if len(para_texts) >= count:
-                    break
-
-    paragraphs = para_texts
-
-    return paragraphs
-
-
-def extract_text_content(
-    table: Table, paragraphs_before: List[str], paragraphs_after: List[str]
-) -> str:
-    """
-    提取表格及其前后段落的文本内容，用于向量化
-
-    Args:
-        table: Table对象
-        paragraphs_before: 表格前面的段落文本列表
-        paragraphs_after: 表格后面的段落文本列表
-
-    Returns:
-        合并后的文本内容
-    """
-    text_parts = []
-
-    # 添加前面的段落
-    for para in paragraphs_before:
-        text_parts.append(para)
-
-    # 提取表格文本内容
-    table_text = []
-    for row in table.rows:
-        row_text = []
-        for cell in row.cells:
-            cell_text = cell.text.strip()
-            if cell_text:
-                row_text.append(cell_text)
-        if row_text:
-            table_text.append(" | ".join(row_text))
-
-    if table_text:
-        text_parts.append("\n".join(table_text))
-
-    # 添加后面的段落
-    for para in paragraphs_after:
-        text_parts.append(para)
-
-    return "\n".join(text_parts)
-
-
-def extract_document_title(doc: DocumentType) -> Optional[str]:
-    """
-    提取文档标题
-
-    Args:
-        doc: Document对象
-
-    Returns:
-        文档标题字符串，如果未找到则返回None
-    """
-    try:
-        if hasattr(doc, "core_properties") and doc.core_properties is not None:
-            title = doc.core_properties.title
-            if title and title.strip():
-                return title.strip()
-
-        if hasattr(doc, "paragraphs") and doc.paragraphs:
-            for para in doc.paragraphs[:5]:
-                if para.text and para.text.strip():
-                    para_text = para.text.strip()
-                    style_name = para.style.name if hasattr(para.style, "name") else ""
-                    if "Heading" in style_name or "Title" in style_name:
-                        return para_text
-                    if len(para_text) > 0 and len(para_text) < 200:
-                        return para_text
-
-        return None
-    except Exception:
-        return None
-
-
 def extract_table_caption(paragraphs_before: List[str]) -> Optional[str]:
     """
     提取表格标题/说明
@@ -282,224 +108,264 @@ def cleanup_temp_file(file_path: str):
         pass
 
 
-def process_style_inheritance(
-    table: Table, paragraphs_before: List[Paragraph], paragraphs_after: List[Paragraph]
+def extract_style_ids_from_xml(xml_content: str) -> Dict[str, Optional[str]]:
+    """
+    从document.xml的XML片段中提取样式ID
+    
+    Args:
+        xml_content: document.xml中的XML字符串片段
+        
+    Returns:
+        包含各种样式ID的字典:
+        - paragraph_style: 段落样式ID (w:pStyle)
+        - table_style: 表格样式ID (w:tblStyle)
+        - run_style: 文本运行样式ID (w:rStyle)
+        - cell_style: 单元格样式ID (w:tcStyle)
+    """
+    style_ids = {
+        "paragraph_style": None,
+        "table_style": None,
+        "run_style": None,
+        "cell_style": None,
+    }
+    
+    if not xml_content:
+        return style_ids
+    
+    # 提取段落样式 w:pStyle w:val="样式ID"
+    p_style_match = re.search(r'w:pStyle[^=]*w:val="([^"]*)"', xml_content, re.IGNORECASE)
+    if p_style_match:
+        style_ids["paragraph_style"] = p_style_match.group(1)
+    
+    # 提取表格样式 w:tblStyle w:val="样式ID"
+    tbl_style_match = re.search(r'w:tblStyle[^=]*w:val="([^"]*)"', xml_content, re.IGNORECASE)
+    if tbl_style_match:
+        style_ids["table_style"] = tbl_style_match.group(1)
+    
+    # 提取文本运行样式 w:rStyle w:val="样式ID"
+    r_style_match = re.search(r'w:rStyle[^=]*w:val="([^"]*)"', xml_content, re.IGNORECASE)
+    if r_style_match:
+        style_ids["run_style"] = r_style_match.group(1)
+    
+    # 提取单元格样式 w:tcStyle w:val="样式ID"
+    tc_style_match = re.search(r'w:tcStyle[^=]*w:val="([^"]*)"', xml_content, re.IGNORECASE)
+    if tc_style_match:
+        style_ids["cell_style"] = tc_style_match.group(1)
+    
+    return style_ids
+
+
+def extract_style_from_styles_xml(
+    styles_xml: str, style_id: str, style_type: str = None
+) -> Optional[Dict[str, Any]]:
+    """
+    从styles.xml中提取指定样式ID的样式定义
+    
+    Args:
+        styles_xml: styles.xml的完整XML内容
+        style_id: 要查找的样式ID
+        style_type: 样式类型 (可选): "paragraph", "table", "character", "numbering"
+        
+    Returns:
+        样式信息字典，包含:
+        - style_id: 样式ID
+        - style_type: 样式类型
+        - name: 样式名称
+        - based_on: 继承的基础样式ID
+        - xml: 完整的样式XML定义
+        如果未找到则返回None
+    """
+    if not styles_xml or not style_id:
+        return None
+    
+    try:
+        from lxml import etree
+        
+        # 解析styles.xml
+        namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+        styles_tree = etree.fromstring(styles_xml.encode('utf-8') if isinstance(styles_xml, str) else styles_xml)
+        
+        # 构建XPath查询
+        if style_type:
+            xpath_query = f'//w:style[@w:styleId="{style_id}" and @w:type="{style_type}"]'
+        else:
+            xpath_query = f'//w:style[@w:styleId="{style_id}"]'
+        
+        # 查找样式
+        style_elements = styles_tree.xpath(xpath_query, namespaces=namespaces)
+        
+        if not style_elements:
+            return None
+        
+        style_element = style_elements[0]
+        
+        # 提取样式信息
+        style_info = {
+            "style_id": style_id,
+            "style_type": style_element.get(f'{{{namespaces["w"]}}}type'),
+            "name": None,
+            "based_on": None,
+            "xml": etree.tostring(style_element, encoding='unicode', pretty_print=True),
+        }
+        
+        # 提取样式名称 w:name w:val="样式名称"
+        name_elem = style_element.xpath('.//w:name/@w:val', namespaces=namespaces)
+        if name_elem:
+            style_info["name"] = name_elem[0]
+        
+        # 提取基础样式 w:basedOn w:val="基础样式ID"
+        based_on_elem = style_element.xpath('.//w:basedOn/@w:val', namespaces=namespaces)
+        if based_on_elem:
+            style_info["based_on"] = based_on_elem[0]
+        
+        return style_info
+        
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"从styles.xml提取样式失败: {e}", exc_info=True)
+        return None
+
+
+def extract_styles_from_document_xml_fragment(
+    document_xml_fragment: str, styles_xml: str
 ) -> Dict[str, Any]:
     """
-    处理样式继承逻辑
-
+    根据document.xml的XML片段提取对应的styles.xml中的样式
+    
     Args:
-        table: Table对象
-        paragraphs_before: 表格前面的段落对象列表
-        paragraphs_after: 表格后面的段落对象列表
-
+        document_xml_fragment: document.xml中的XML片段（如段落、表格、文本运行等）
+        styles_xml: styles.xml的完整XML内容
+        
     Returns:
-        样式信息字典
+        包含提取到的样式信息的字典:
+        - paragraph_style: 段落样式信息（如果有）
+        - table_style: 表格样式信息（如果有）
+        - run_style: 文本运行样式信息（如果有）
+        - cell_style: 单元格样式信息（如果有）
+        - all_styles: 所有找到的样式列表
     """
-    from docx.enum.style import WD_STYLE_TYPE
-    import logging
-
-    logger = logging.getLogger(__name__)
-
-    style_metadata = {
-        "table_styles": {},
-        "paragraph_styles": {},
-        "style_inheritance": {},
+    result = {
+        "paragraph_style": None,
+        "table_style": None,
+        "run_style": None,
+        "cell_style": None,
+        "all_styles": [],
     }
-
+    
+    if not document_xml_fragment or not styles_xml:
+        return result
+    
     try:
-        document = None
-
-        if hasattr(table, "_parent") and table._parent is not None:
-            if hasattr(table._parent, "document"):
-                document = table._parent.document
-            elif hasattr(table._parent, "part") and hasattr(
-                table._parent.part, "document"
-            ):
-                document = table._parent.part.document
-
-        if document is None and len(paragraphs_before) > 0:
-            para = paragraphs_before[0]
-            if hasattr(para, "_parent") and para._parent is not None:
-                if hasattr(para._parent, "document"):
-                    document = para._parent.document
-                elif hasattr(para._parent, "part") and hasattr(
-                    para._parent.part, "document"
-                ):
-                    document = para._parent.part.document
-
-        if document is None and len(paragraphs_after) > 0:
-            para = paragraphs_after[0]
-            if hasattr(para, "_parent") and para._parent is not None:
-                if hasattr(para._parent, "document"):
-                    document = para._parent.document
-                elif hasattr(para._parent, "part") and hasattr(
-                    para._parent.part, "document"
-                ):
-                    document = para._parent.part.document
-
-        if document is None or not hasattr(document, "styles"):
-            return style_metadata
-
-        def extract_style_xml(style):
-            """提取样式的XML内容"""
-            try:
-                if hasattr(style, "_element"):
-                    return style._element.xml
-                elif hasattr(style, "element"):
-                    return style.element.xml
-            except:
-                pass
-            return ""
-
-        def extract_based_on_from_xml(style_xml):
-            """从XML中提取w:basedOn属性"""
-            if not style_xml:
-                return None
-            match = re.search(r'w:basedOn[^=]*="([^"]*)"', style_xml, re.IGNORECASE)
-            if match:
-                return match.group(1)
-            return None
-
-        def get_based_on_chain(style, style_dict, visited=None):
-            """递归获取样式继承链"""
-            if visited is None:
-                visited = set()
-
-            style_id = style.style_id if hasattr(style, "style_id") else None
-            if not style_id or style_id in visited:
-                return []
-
-            visited.add(style_id)
-            chain = [style_id]
-
-            based_on_id = None
-            if hasattr(style, "based_on") and style.based_on is not None:
-                based_on_id = (
-                    style.based_on.style_id
-                    if hasattr(style.based_on, "style_id")
-                    else None
-                )
-            else:
-                style_xml = extract_style_xml(style)
-                based_on_id = extract_based_on_from_xml(style_xml)
-
-            if based_on_id and based_on_id in style_dict:
-                based_on_style = style_dict[based_on_id]
-                based_on_chain = get_based_on_chain(based_on_style, style_dict, visited)
-                chain.extend(based_on_chain)
-
-            return chain
-
-        def extract_style_info(style, all_styles_dict):
-            """提取样式信息"""
-            style_id = style.style_id if hasattr(style, "style_id") else None
-            style_name = style.name if hasattr(style, "name") else None
-            style_type = str(style.type) if hasattr(style, "type") else None
-            style_xml = extract_style_xml(style)
-
-            style_info = {
-                "style_id": style_id,
-                "name": style_name,
-                "type": style_type,
-                "xml": style_xml,
-            }
-
-            based_on_id = None
-            if hasattr(style, "based_on") and style.based_on is not None:
-                based_on_id = (
-                    style.based_on.style_id
-                    if hasattr(style.based_on, "style_id")
-                    else None
-                )
-            else:
-                based_on_id = extract_based_on_from_xml(style_xml)
-
-            style_info["based_on"] = based_on_id
-            style_info["inheritance_chain"] = (
-                get_based_on_chain(style, all_styles_dict) if style_id else []
-            )
-
-            return style_info
-
-        try:
-            styles = document.styles
-        except:
-            return style_metadata
-
-        all_styles_dict = {}
-        for style in styles:
-            try:
-                style_id = style.style_id if hasattr(style, "style_id") else None
-                if style_id:
-                    all_styles_dict[style_id] = style
-            except:
-                continue
-
-        table_styles_dict = {}
-        for style in styles:
-            try:
-                if hasattr(style, "type") and style.type == WD_STYLE_TYPE.TABLE:
-                    style_info = extract_style_info(style, all_styles_dict)
-                    style_id = style_info["style_id"]
-                    if style_id:
-                        table_styles_dict[style_id] = style_info
-            except:
-                continue
-
-        style_metadata["table_styles"] = table_styles_dict
-
-        paragraph_styles_dict = {}
-        all_paragraphs = paragraphs_before + paragraphs_after
-
-        for para in all_paragraphs:
-            try:
-                if hasattr(para, "style") and para.style is not None:
-                    style = para.style
-                    style_id = style.style_id if hasattr(style, "style_id") else None
-
-                    if style_id:
-                        if style_id not in paragraph_styles_dict:
-                            if style_id not in all_styles_dict:
-                                all_styles_dict[style_id] = style
-                            style_info = extract_style_info(style, all_styles_dict)
-                            paragraph_styles_dict[style_id] = style_info
-            except:
-                continue
-
-        style_metadata["paragraph_styles"] = paragraph_styles_dict
-
-        inheritance_map = {}
-        all_styles = list(table_styles_dict.values()) + list(
-            paragraph_styles_dict.values()
-        )
-
-        for style_info in all_styles:
-            style_id = style_info.get("style_id")
+        # 从document.xml片段中提取样式ID（使用正则表达式，不要求完整XML）
+        style_ids = extract_style_ids_from_xml(document_xml_fragment)
+        
+        # 根据样式类型映射
+        style_type_map = {
+            "paragraph_style": "paragraph",
+            "table_style": "table",
+            "run_style": "character",
+            "cell_style": "table",
+        }
+        
+        # 提取每个样式
+        for style_key, style_id in style_ids.items():
             if style_id:
-                inheritance_map[style_id] = {
-                    "based_on": style_info.get("based_on"),
-                    "inheritance_chain": style_info.get("inheritance_chain", []),
-                }
-
-        style_metadata["style_inheritance"] = inheritance_map
-
-        tbl_element = table._tbl
-        tbl_xml = tbl_element.xml
-
-        if tbl_xml:
-            tbl_style_match = re.search(
-                r'w:tblStyle[^=]*="([^"]*)"', tbl_xml, re.IGNORECASE
-            )
-            if tbl_style_match:
-                tbl_style_id = tbl_style_match.group(1)
-                style_metadata["table_applied_style"] = tbl_style_id
-                if tbl_style_id in table_styles_dict:
-                    style_metadata["table_applied_style_info"] = table_styles_dict[
-                        tbl_style_id
-                    ]
-
+                try:
+                    style_type = style_type_map.get(style_key)
+                    style_info = extract_style_from_styles_xml(styles_xml, style_id, style_type)
+                    
+                    if style_info:
+                        result[style_key] = style_info
+                        result["all_styles"].append(style_info)
+                        
+                        # 如果样式有继承关系，递归提取基础样式
+                        if style_info.get("based_on"):
+                            based_on_id = style_info["based_on"]
+                            try:
+                                based_on_info = extract_style_from_styles_xml(
+                                    styles_xml, based_on_id, style_type
+                                )
+                                if based_on_info:
+                                    style_info["based_on_style"] = based_on_info
+                                    result["all_styles"].append(based_on_info)
+                            except Exception as e:
+                                import logging
+                                logger = logging.getLogger(__name__)
+                                logger.warning(f"提取基础样式失败 (style_id={based_on_id}): {e}")
+                except Exception as e:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"提取样式失败 (style_key={style_key}, style_id={style_id}): {e}")
+                    continue
+        
     except Exception as e:
-        logger.error(f"处理样式继承失败: {e}", exc_info=True)
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"extract_styles_from_document_xml_fragment 执行失败: {e}", exc_info=True)
+    
+    return result
 
-    return style_metadata
+
+def get_styles_xml_from_docx_file(file_content: bytes) -> Optional[str]:
+    """
+    从docx文件内容（bytes）中提取styles.xml
+    
+    Args:
+        file_content: docx文件的二进制内容
+        
+    Returns:
+        styles.xml的字符串内容，如果未找到则返回None
+    """
+    try:
+        from zipfile import ZipFile
+        from io import BytesIO
+        
+        # 将文件内容转换为BytesIO对象
+        file_stream = BytesIO(file_content)
+        
+        with ZipFile(file_stream, 'r') as docx:
+            # 检查styles.xml是否存在
+            if 'word/styles.xml' in docx.namelist():
+                styles_xml = docx.read('word/styles.xml').decode('utf-8')
+                return styles_xml
+            else:
+                return None
+                
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"从docx文件提取styles.xml失败: {e}", exc_info=True)
+        return None
+
+
+def get_styles_xml_from_docx_stream(file_stream) -> Optional[str]:
+    """
+    从docx文件流（BytesIO）中提取styles.xml
+    
+    Args:
+        file_stream: BytesIO对象或类似文件对象
+        
+    Returns:
+        styles.xml的字符串内容，如果未找到则返回None
+    """
+    try:
+        from zipfile import ZipFile
+        
+        # 确保文件指针在开头
+        if hasattr(file_stream, 'seek'):
+            file_stream.seek(0)
+        
+        with ZipFile(file_stream, 'r') as docx:
+            # 检查styles.xml是否存在
+            if 'word/styles.xml' in docx.namelist():
+                styles_xml = docx.read('word/styles.xml').decode('utf-8')
+                return styles_xml
+            else:
+                return None
+                
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"从docx流提取styles.xml失败: {e}", exc_info=True)
+        return None

@@ -17,15 +17,13 @@ from docx.text.paragraph import Paragraph
 
 from models import UploadResponse
 from database import get_collection, get_model
-from config import MAX_FILE_SIZE, COZE_EXTRACT_TABLE_WORKFLOW_ID
+from config import MAX_FILE_SIZE, COZE_SUMMARY_TABLE_WORKFLOW_ID, COZE_EXTRACT_PARA_WORKFLOW_ID
 from utils.exceptions import HTTP_413_REQUEST_ENTITY_TOO_LARGE
 from utils.docx_utils import (
     extract_table_xml,
-    get_paragraphs_before_table,
-    get_paragraphs_after_table,
-    extract_text_content,
-    process_style_inheritance,
     extract_paragraphs_xml,
+    get_styles_xml_from_docx_stream,
+    extract_styles_from_document_xml_fragment,
 )
 
 from utils.coze import async_coze
@@ -99,6 +97,9 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                 success=False, message=f"DOCX文件解析失败: {str(e)}", data=None
             )
 
+        styles_xml = get_styles_xml_from_docx_stream(file_stream)
+        logger.info(f"styles_xml: {styles_xml}")
+
         # 提取所有表格
         tables = doc.tables
         if not tables:
@@ -113,19 +114,6 @@ async def upload_file(file: UploadFile) -> UploadResponse:
             try:
                 # 提取表格XML
                 table_xml = extract_table_xml(table)
-
-                # 提取表格前后的段落
-                paragraphs_before_text = get_paragraphs_before_table(
-                    doc, table_index, count=3
-                )
-                paragraphs_after_text = get_paragraphs_after_table(
-                    doc, table_index, count=1
-                )
-
-                # 提取文本内容用于向量化
-                text_content = extract_text_content(
-                    table, paragraphs_before_text, paragraphs_after_text
-                )
 
                 # 处理样式继承
                 target_table_elem = table._tbl
@@ -154,69 +142,75 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                     if len(para_objs_before) > 3
                     else para_objs_before
                 )
-                style_info = process_style_inheritance(
-                    table, paragraphs_before_objs, paragraphs_after_objs
-                )
 
                 # 获取段落对象的XML
                 paragraphs_before_xml = "\n".join(extract_paragraphs_xml(paragraphs_before_objs))
                 paragraphs_after_xml = "\n".join(extract_paragraphs_xml(paragraphs_after_objs))
 
-                table = ET.fromstring(table_xml)
-                text = ' '.join([text.strip() for text in table.itertext()])
+                # 提取表格文本内容用于Coze工作流
+                table_xml_tree = ET.fromstring(table_xml)
+                text = ','.join([text.strip() for text in table_xml_tree.itertext()])
                 text = text.strip()
-                text = f"表格内容总结后是：{text}"
-                raw_xml = paragraphs_before_xml + "\n" + f"<w:tbl>{text}</w:tbl>" + "\n" + paragraphs_after_xml
-                style_info_str = json.dumps(style_info, ensure_ascii=False)
 
-                logger.info(f"""
-                            .docx文件的表格在document.xml文件中的xml内容是：
-                            {raw_xml}
-                            .docx文件的表格在styles.xml文件中的样式信息是：
-                            {style_info_str}
-                            """)
-
-                # 使用异步调用 LLM，避免阻塞事件循环
                 try:
-                    response = await async_coze.workflows.runs.create(
-                        workflow_id=COZE_EXTRACT_TABLE_WORKFLOW_ID,
+                    table_summary_wrapper = await async_coze.workflows.runs.create(
+                        workflow_id=COZE_SUMMARY_TABLE_WORKFLOW_ID,
                         parameters={
-                            "raw_xml": f"""
-                            .docx文件的表格在document.xml文件中的xml内容是：
-                            {raw_xml}
-                            .docx文件的表格在styles.xml文件中的样式信息是：
-                            {style_info_str}
-                            """
+                            "table_content": text
                         }
                     )
-                    logger.info(f"Coze API调用成功: {response}")
-                    result = json.loads(response.data)
-                    table_xml_from_llm = result.get("xml_content", "")
-                    style_info = result.get("style_info", "")
+                    table_summary_wrapper = json.loads(table_summary_wrapper.data)
+                    table_summary = table_summary_wrapper.get("table_summary", "")
+                    logger.info(f"表格内容总结成功: {table_summary}")
+                    xml_content = paragraphs_before_xml + "\n" + "<w:tbl></w:tbl>" + "\n" + paragraphs_after_xml
+                    para_extract_wrapper = await async_coze.workflows.runs.create(
+                        workflow_id=COZE_EXTRACT_PARA_WORKFLOW_ID,
+                        parameters={
+                            "table_summary": table_summary,
+                            "xml_content": xml_content
+                        }
+                    )
+                    para_extract_wrapper = json.loads(para_extract_wrapper.data)
+                    xml_content = para_extract_wrapper.get("xml_content", "")
+                    xml_content = re.sub(r"<w:tbl>.*?</w:tbl>", table_xml, xml_content)
+                    logger.info(f"表格XML内容: {xml_content}")
                     
-                    # re.sub(pattern, repl, string) 参数说明：
-                    # pattern: 正则表达式模式，匹配要替换的内容
-                    # repl: 替换的字符串（或函数），用于替换匹配到的内容
-                    # string: 要搜索的源字符串
-                    # 作用：在 table_xml_from_llm 中查找 <w:tbl>...</w:tbl>，用原始的 table_xml 替换它
-                    table_xml = re.sub(r"<w:tbl>.*?</w:tbl>", table_xml, table_xml_from_llm)
+                    # 提取文本内容（处理多个根元素的情况）
+                    try:
+                        # 尝试解析为单个XML文档
+                        table_xml_content = ET.fromstring(xml_content)
+                        text_content = ','.join([text.strip() for text in table_xml_content.itertext()])
+                    except ET.ParseError:
+                        # 如果包含多个根元素，使用XML片段解析
+                        # 将多个根元素包装在一个临时根元素中
+                        wrapped_xml = f"<root>{xml_content}</root>"
+                        try:
+                            wrapped_tree = ET.fromstring(wrapped_xml)
+                            text_content = ','.join([text.strip() for text in wrapped_tree.itertext()])
+                        except Exception as e:
+                            logger.warning(f"XML解析失败，使用正则提取文本: {e}")
+                            # 使用正则表达式提取所有文本内容作为后备方案
+                            text_matches = re.findall(r'<w:t[^>]*>(.*?)</w:t>', xml_content, re.DOTALL)
+                            text_content = ','.join([text.strip() for text in text_matches if text.strip()])
 
-                    logger.info(f"{table_xml}\n{style_info}")
-
+                    # 提取样式信息（如果styles_xml存在）
+                    if styles_xml:
+                        try:
+                            table_style_info = extract_styles_from_document_xml_fragment(xml_content, styles_xml)
+                        except Exception as e:
+                            logger.error(f"提取样式信息失败: {e}", exc_info=True)
+                            table_style_info = {}
+                    else:
+                        table_style_info = {}
                 except Exception as e:
-                    logger.error(f"LLM处理失败: {e}", exc_info=True)
-                    # 如果LLM处理失败，使用原始数据
-                    logger.warning("使用原始表格XML和样式信息")
-                    # table_xml 和 style_info 保持原值，不进行修改
+                    logger.error(f"表格提取失败: {e}", exc_info=True)
+                    continue
 
                 # 生成唯一的表格ID
                 table_id = str(uuid.uuid4())
 
                 # 获取创建时间
                 creation_time = datetime.now().isoformat()
-
-                # 将 style_info 转换为 JSON 字符串（ChromaDB metadata 不支持嵌套字典）
-                style_info_json = json.dumps(style_info, ensure_ascii=False)
 
                 # 构建metadata结构
                 # 注意：ChromaDB metadata 只支持基本类型（str, int, float, bool, None）
@@ -226,7 +220,7 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                     "filename": file.filename,
                     "file_size": str(file_size),  # 确保是字符串类型
                     "table_index": str(table_index),  # 确保是字符串类型
-                    "style_info": style_info_json,  # JSON 字符串
+                    "style_info": json.dumps(table_style_info, ensure_ascii=False),  # 序列化为JSON字符串
                     "creation_time": creation_time,
                 }
 

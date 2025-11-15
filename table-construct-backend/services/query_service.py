@@ -87,6 +87,8 @@ async def query_tables(
                         pass
 
                 # 调用 xml_to_html 函数将 XML 转换为 HTML
+                logger.info(f"document: {document}")
+                logger.info(f"style: {metadata.get('style_info', {})}")
                 xml = document + metadata.get("style_info", {})
                 table_html = xml_to_html(xml) if document else ""
 
