@@ -101,8 +101,7 @@ async def upload_file(file: UploadFile) -> UploadResponse:
             )
 
         styles_xml = get_styles_xml_from_docx_stream(file_stream)
-        logger.info(f"styles_xml: {styles_xml}")
-
+        
         # 提取所有表格
         tables = doc.tables
         if not tables:
@@ -117,6 +116,25 @@ async def upload_file(file: UploadFile) -> UploadResponse:
             try:
                 # 提取表格XML
                 table_xml = extract_table_xml(table)
+                
+                # 检查空格类型（用于调试）
+                def check_space_type(xml_str, label=""):
+                    """检查XML中的空格类型"""
+                    import re
+                    # 提取所有 <w:t> 标签中的文本
+                    text_matches = re.findall(r'<w:t[^>]*>(.*?)</w:t>', xml_str, re.DOTALL)
+                    for i, text in enumerate(text_matches):
+                        # 只检查只包含空白字符的文本节点（通常是下划线用的空格）
+                        if not text.strip() and text:  # 只包含空白字符
+                            has_fullwidth = '\u3000' in text
+                            has_halfwidth = '\u0020' in text
+                            space_count = len([c for c in text if c in ['\u0020', '\u3000']])
+                            if has_fullwidth:
+                                logger.info(f"{label} 文本节点 {i}: 包含全角空格 (U+3000) ⚠️, 空格数量={space_count}")
+                            elif has_halfwidth:
+                                logger.debug(f"{label} 文本节点 {i}: 包含普通空格 (U+0020), 空格数量={space_count}")
+                
+                check_space_type(table_xml, f"表格XML (table_index={table_index})")
 
                 # 处理样式继承
                 target_table_elem = table._tbl
@@ -176,7 +194,6 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                     para_extract_wrapper = json.loads(para_extract_wrapper.data)
                     xml_content = para_extract_wrapper.get("xml_content", "")
                     xml_content = re.sub(r"<w:tbl>.*?</w:tbl>", table_xml, xml_content)
-                    logger.info(f"表格XML内容: {xml_content}")
                     
                     # 提取文本内容（处理多个根元素的情况）
                     try:
@@ -263,9 +280,6 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                     logger.error(f"表格提取失败: {e}", exc_info=True)
                     continue
 
-                logger.info(f"table_style_info: paragraph_style={table_style_info.get('paragraph_style') is not None}, "
-                          f"table_style={table_style_info.get('table_style') is not None}")
-
                 # 生成唯一的表格ID
                 table_id = str(uuid.uuid4())
 
@@ -275,7 +289,7 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                 # 将样式信息存储到MongoDB
                 mongo_id = None
                 try:
-                    if mongo_collection:
+                    if mongo_collection is not None:
                         style_document = {
                             "table_id": table_id,
                             "filename": file.filename,
@@ -325,7 +339,7 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                         ids=[table_id],
                         embeddings=[embedding],
                         metadatas=[metadata],
-                        documents=[table_xml],
+                        documents=[xml_content],
                     )
                     logger.info(
                         f"表格存储成功: filename={file.filename}, table_id={table_id}, table_index={table_index}"

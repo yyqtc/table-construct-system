@@ -367,3 +367,229 @@ def get_styles_xml_from_docx_stream(file_stream) -> Optional[str]:
         logger = logging.getLogger(__name__)
         logger.error(f"从docx流提取styles.xml失败: {e}", exc_info=True)
         return None
+
+
+def create_docx_with_table_and_styles(
+    table_xml: str, styles_dict: Dict[str, Optional[str]], output_path: str
+) -> bool:
+    """
+    创建包含表格和样式的临时DOCX文件
+    支持表格前后包含段落（标题、注释等）
+    
+    Args:
+        table_xml: 表格的XML字符串，可以是：
+                   - 单独的<w:tbl>元素
+                   - 包含段落和表格的XML片段（多个<w:p>和<w:tbl>元素）
+        styles_dict: 样式字典，包含 paragraph_style, table_style, run_style, cell_style 的XML字符串
+        output_path: 输出文件路径
+        
+    Returns:
+        成功返回True，失败返回False
+    """
+    try:
+        from zipfile import ZipFile, ZIP_DEFLATED
+        from lxml import etree
+        from io import BytesIO
+        
+        # 创建一个新的空DOCX文档作为模板
+        doc = Document()
+        template_buffer = BytesIO()
+        doc.save(template_buffer)
+        template_buffer.seek(0)
+        
+        # 读取模板DOCX并修改
+        with ZipFile(template_buffer, 'r') as template_zip:
+            # 创建新的ZIP文件
+            output_buffer = BytesIO()
+            with ZipFile(output_buffer, 'w', ZIP_DEFLATED) as new_zip:
+                # 复制模板中的所有文件（跳过document.xml和styles.xml，后面会写入）
+                files_to_skip = {'word/document.xml', 'word/styles.xml'}
+                for item in template_zip.infolist():
+                    if item.filename not in files_to_skip:
+                        data = template_zip.read(item.filename)
+                        # 使用文件名而不是ZipInfo对象，避免重复警告
+                        new_zip.writestr(item.filename, data)
+                
+                # 修改 document.xml，添加表格和段落
+                namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+                doc_xml = template_zip.read('word/document.xml')
+                doc_tree = etree.fromstring(doc_xml)
+                
+                # 解析XML内容（可能包含段落和表格）
+                # 使用XMLParser保留空格属性
+                parser = etree.XMLParser(remove_blank_text=False)
+                try:
+                    # 尝试解析为单个XML文档
+                    content_tree = etree.fromstring(table_xml.encode('utf-8'), parser=parser)
+                    elements_to_add = [content_tree]
+                except etree.XMLSyntaxError:
+                    # 如果包含多个根元素，尝试包装在临时根元素中
+                    try:
+                        wrapped_xml = f"<root xmlns:w=\"{namespaces['w']}\">{table_xml}</root>"
+                        wrapped_tree = etree.fromstring(wrapped_xml.encode('utf-8'), parser=parser)
+                        elements_to_add = list(wrapped_tree)
+                    except Exception:
+                        # 如果还是失败，尝试使用正则表达式提取段落和表格
+                        import re
+                        elements_to_add = []
+                        # 提取所有段落
+                        para_matches = re.findall(r'<w:p[^>]*>.*?</w:p>', table_xml, re.DOTALL)
+                        for para_xml in para_matches:
+                            try:
+                                para_tree = etree.fromstring(para_xml.encode('utf-8'), parser=parser)
+                                elements_to_add.append(para_tree)
+                            except:
+                                pass
+                        # 提取表格
+                        tbl_matches = re.findall(r'<w:tbl[^>]*>.*?</w:tbl>', table_xml, re.DOTALL)
+                        for tbl_xml in tbl_matches:
+                            try:
+                                tbl_tree = etree.fromstring(tbl_xml.encode('utf-8'), parser=parser)
+                                elements_to_add.append(tbl_tree)
+                            except:
+                                pass
+                
+                # 递归复制元素，保留所有属性（包括xml:space）
+                def deep_copy_element(source_elem, target_parent, target_ns):
+                    """递归复制元素，保留所有属性和命名空间"""
+                    if source_elem.tag.startswith('{'):
+                        # 提取命名空间和标签名
+                        ns, tag = source_elem.tag[1:].split('}', 1)
+                        if ns == namespaces['w']:
+                            new_elem = etree.SubElement(target_parent, source_elem.tag)
+                        else:
+                            # 保持原始命名空间
+                            new_elem = etree.SubElement(target_parent, source_elem.tag)
+                    else:
+                        # 没有命名空间，添加默认命名空间
+                        new_elem = etree.SubElement(target_parent, f"{{{target_ns}}}{source_elem.tag}")
+                    
+                    # 复制所有属性（包括xml:space）
+                    for attr, value in source_elem.attrib.items():
+                        new_elem.set(attr, value)
+                    
+                    # 复制文本内容
+                    if source_elem.text is not None:
+                        new_elem.text = source_elem.text
+                    
+                    # 递归复制子元素
+                    for child in source_elem:
+                        deep_copy_element(child, new_elem, target_ns)
+                    
+                    # 复制tail文本
+                    if source_elem.tail is not None:
+                        new_elem.tail = source_elem.tail
+                    
+                    return new_elem
+                
+                # 清空body并添加所有元素（段落和表格）
+                body = doc_tree.xpath('//w:body', namespaces=namespaces)[0]
+                # 移除body中的所有子元素
+                for child in list(body):
+                    body.remove(child)
+                
+                # 按顺序添加所有元素（保持段落和表格的原始顺序）
+                for element in elements_to_add:
+                    deep_copy_element(element, body, namespaces['w'])
+                
+                # 保存修改后的document.xml，使用method='xml'确保保留所有属性
+                new_doc_xml = etree.tostring(
+                    doc_tree, 
+                    encoding='utf-8', 
+                    xml_declaration=True,
+                    method='xml',
+                    pretty_print=False  # 不格式化，保持原始格式
+                )
+                new_zip.writestr('word/document.xml', new_doc_xml)
+                
+                # 从 styles_dict 构建完整的 styles.xml，完全覆盖原来的
+                styles_xml_content = build_styles_xml_from_dict(styles_dict)
+                if styles_xml_content:
+                    new_zip.writestr('word/styles.xml', styles_xml_content.encode('utf-8'))
+            
+            # 将新ZIP文件写入磁盘
+            output_buffer.seek(0)
+            with open(output_path, 'wb') as f:
+                f.write(output_buffer.getvalue())
+        
+        return True
+        
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"创建DOCX文件失败: {e}", exc_info=True)
+        return False
+
+
+def build_styles_xml_from_dict(styles_dict: Dict[str, Optional[str]]) -> Optional[str]:
+    """
+    从样式字典构建完整的 styles.xml，完全覆盖原来的内容
+    
+    Args:
+        styles_dict: 样式字典，包含 paragraph_style, table_style, run_style, cell_style 的XML字符串
+        
+    Returns:
+        完整的 styles.xml 的 XML 字符串
+    """
+    try:
+        from lxml import etree
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+        
+        # 创建新的 styles 根元素
+        styles_root = etree.Element(
+            '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}styles',
+            nsmap=namespaces
+        )
+        
+        # 添加样式字典中的所有样式
+        for style_key, style_xml in styles_dict.items():
+            if style_xml:
+                try:
+                    # 解析样式XML
+                    style_element = etree.fromstring(style_xml.encode('utf-8'))
+                    # 添加到根元素
+                    styles_root.append(style_element)
+                except Exception as e:
+                    logger.warning(f"解析样式XML失败 ({style_key}): {e}")
+                    continue
+        
+        # 如果没有样式，至少创建一个基本的styles.xml结构
+        if len(styles_root) == 0:
+            # 创建一个默认段落样式
+            default_style = etree.SubElement(
+                styles_root,
+                '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}style',
+                attrib={
+                    '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type': 'paragraph',
+                    '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}styleId': 'Normal',
+                    '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}default': '1'
+                }
+            )
+            name_elem = etree.SubElement(
+                default_style,
+                '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}name',
+                attrib={
+                    '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val': 'Normal'
+                }
+            )
+        
+        # 转换为字符串
+        styles_xml_str = etree.tostring(
+            styles_root,
+            encoding='utf-8',
+            xml_declaration=True,
+            pretty_print=True
+        ).decode('utf-8')
+        
+        return styles_xml_str
+        
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"构建styles.xml失败: {e}", exc_info=True)
+        return None
+
+
