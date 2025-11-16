@@ -133,33 +133,105 @@ def extract_style_ids_from_xml(xml_content: str) -> Dict[str, Optional[str]]:
         return style_ids
     
     # 提取段落样式 w:pStyle w:val="样式ID"
-    p_style_match = re.search(r'w:pStyle[^=]*w:val="([^"]*)"', xml_content, re.IGNORECASE)
-    if p_style_match:
-        style_ids["paragraph_style"] = p_style_match.group(1)
+    # 支持多种格式：<w:pStyle w:val="..."/> 或 <w:pStyle w:val='...'/> 或带命名空间的格式
+    p_style_patterns = [
+        r'<w:pStyle[^>]*w:val=["\']([^"\']*)["\']',  # 标准格式
+        r'w:pStyle[^>]*w:val=["\']([^"\']*)["\']',   # 不带<的格式
+        r'pStyle[^>]*val=["\']([^"\']*)["\']',        # 简化格式
+    ]
+    for pattern in p_style_patterns:
+        p_style_match = re.search(pattern, xml_content, re.IGNORECASE | re.DOTALL)
+        if p_style_match:
+            style_ids["paragraph_style"] = p_style_match.group(1)
+            break
     
     # 提取表格样式 w:tblStyle w:val="样式ID"
-    tbl_style_match = re.search(r'w:tblStyle[^=]*w:val="([^"]*)"', xml_content, re.IGNORECASE)
-    if tbl_style_match:
-        style_ids["table_style"] = tbl_style_match.group(1)
+    tbl_style_patterns = [
+        r'<w:tblStyle[^>]*w:val=["\']([^"\']*)["\']',
+        r'w:tblStyle[^>]*w:val=["\']([^"\']*)["\']',
+        r'tblStyle[^>]*val=["\']([^"\']*)["\']',
+    ]
+    for pattern in tbl_style_patterns:
+        tbl_style_match = re.search(pattern, xml_content, re.IGNORECASE | re.DOTALL)
+        if tbl_style_match:
+            style_ids["table_style"] = tbl_style_match.group(1)
+            break
     
     # 提取文本运行样式 w:rStyle w:val="样式ID"
-    r_style_match = re.search(r'w:rStyle[^=]*w:val="([^"]*)"', xml_content, re.IGNORECASE)
-    if r_style_match:
-        style_ids["run_style"] = r_style_match.group(1)
+    r_style_patterns = [
+        r'<w:rStyle[^>]*w:val=["\']([^"\']*)["\']',
+        r'w:rStyle[^>]*w:val=["\']([^"\']*)["\']',
+        r'rStyle[^>]*val=["\']([^"\']*)["\']',
+    ]
+    for pattern in r_style_patterns:
+        r_style_match = re.search(pattern, xml_content, re.IGNORECASE | re.DOTALL)
+        if r_style_match:
+            style_ids["run_style"] = r_style_match.group(1)
+            break
     
     # 提取单元格样式 w:tcStyle w:val="样式ID"
-    tc_style_match = re.search(r'w:tcStyle[^=]*w:val="([^"]*)"', xml_content, re.IGNORECASE)
-    if tc_style_match:
-        style_ids["cell_style"] = tc_style_match.group(1)
+    tc_style_patterns = [
+        r'<w:tcStyle[^>]*w:val=["\']([^"\']*)["\']',
+        r'w:tcStyle[^>]*w:val=["\']([^"\']*)["\']',
+        r'tcStyle[^>]*val=["\']([^"\']*)["\']',
+    ]
+    for pattern in tc_style_patterns:
+        tc_style_match = re.search(pattern, xml_content, re.IGNORECASE | re.DOTALL)
+        if tc_style_match:
+            style_ids["cell_style"] = tc_style_match.group(1)
+            break
     
     return style_ids
 
 
+def get_default_style_id(styles_xml: str, style_type: str) -> Optional[str]:
+    """
+    从styles.xml中获取默认样式ID
+    
+    Args:
+        styles_xml: styles.xml的完整XML内容
+        style_type: 样式类型: "paragraph", "table", "character", "numbering"
+        
+    Returns:
+        默认样式ID，如果未找到则返回None
+    """
+    if not styles_xml or not style_type:
+        return None
+    
+    try:
+        from lxml import etree
+        
+        namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+        styles_tree = etree.fromstring(styles_xml.encode('utf-8') if isinstance(styles_xml, str) else styles_xml)
+        
+        # 查找默认样式：w:default="1" 或 w:styleId="1" (段落默认样式通常是 "1" 或 "Normal")
+        xpath_query = f'//w:style[@w:type="{style_type}" and @w:default="1"]/@w:styleId'
+        default_styles = styles_tree.xpath(xpath_query, namespaces=namespaces)
+        
+        if default_styles:
+            return default_styles[0]
+        
+        # 如果没有找到 w:default="1"，尝试查找 styleId="1" 的样式（段落默认样式通常是 "1"）
+        if style_type == "paragraph":
+            xpath_query = '//w:style[@w:type="paragraph" and @w:styleId="1"]/@w:styleId'
+            style_id_1 = styles_tree.xpath(xpath_query, namespaces=namespaces)
+            if style_id_1:
+                return "1"
+        
+        return None
+        
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"查找默认样式失败: {e}")
+        return None
+
+
 def extract_style_from_styles_xml(
     styles_xml: str, style_id: str, style_type: str = None
-) -> Optional[Dict[str, Any]]:
+) -> Optional[str]:
     """
-    从styles.xml中提取指定样式ID的样式定义
+    从styles.xml中提取指定样式ID的样式XML定义
     
     Args:
         styles_xml: styles.xml的完整XML内容
@@ -167,13 +239,7 @@ def extract_style_from_styles_xml(
         style_type: 样式类型 (可选): "paragraph", "table", "character", "numbering"
         
     Returns:
-        样式信息字典，包含:
-        - style_id: 样式ID
-        - style_type: 样式类型
-        - name: 样式名称
-        - based_on: 继承的基础样式ID
-        - xml: 完整的样式XML定义
-        如果未找到则返回None
+        样式的完整XML字符串，如果未找到则返回None
     """
     if not styles_xml or not style_id:
         return None
@@ -199,26 +265,8 @@ def extract_style_from_styles_xml(
         
         style_element = style_elements[0]
         
-        # 提取样式信息
-        style_info = {
-            "style_id": style_id,
-            "style_type": style_element.get(f'{{{namespaces["w"]}}}type'),
-            "name": None,
-            "based_on": None,
-            "xml": etree.tostring(style_element, encoding='unicode', pretty_print=True),
-        }
-        
-        # 提取样式名称 w:name w:val="样式名称"
-        name_elem = style_element.xpath('.//w:name/@w:val', namespaces=namespaces)
-        if name_elem:
-            style_info["name"] = name_elem[0]
-        
-        # 提取基础样式 w:basedOn w:val="基础样式ID"
-        based_on_elem = style_element.xpath('.//w:basedOn/@w:val', namespaces=namespaces)
-        if based_on_elem:
-            style_info["based_on"] = based_on_elem[0]
-        
-        return style_info
+        # 返回样式的完整XML字符串
+        return etree.tostring(style_element, encoding='unicode', pretty_print=True)
         
     except Exception as e:
         import logging
@@ -229,28 +277,26 @@ def extract_style_from_styles_xml(
 
 def extract_styles_from_document_xml_fragment(
     document_xml_fragment: str, styles_xml: str
-) -> Dict[str, Any]:
+) -> Dict[str, Optional[str]]:
     """
-    根据document.xml的XML片段提取对应的styles.xml中的样式
+    根据document.xml的XML片段提取对应的styles.xml中的样式XML
     
     Args:
         document_xml_fragment: document.xml中的XML片段（如段落、表格、文本运行等）
         styles_xml: styles.xml的完整XML内容
         
     Returns:
-        包含提取到的样式信息的字典:
-        - paragraph_style: 段落样式信息（如果有）
-        - table_style: 表格样式信息（如果有）
-        - run_style: 文本运行样式信息（如果有）
-        - cell_style: 单元格样式信息（如果有）
-        - all_styles: 所有找到的样式列表
+        包含提取到的样式XML的字典:
+        - paragraph_style: 段落样式XML字符串（如果有）
+        - table_style: 表格样式XML字符串（如果有）
+        - run_style: 文本运行样式XML字符串（如果有）
+        - cell_style: 单元格样式XML字符串（如果有）
     """
     result = {
         "paragraph_style": None,
         "table_style": None,
         "run_style": None,
         "cell_style": None,
-        "all_styles": [],
     }
     
     if not document_xml_fragment or not styles_xml:
@@ -268,31 +314,15 @@ def extract_styles_from_document_xml_fragment(
             "cell_style": "table",
         }
         
-        # 提取每个样式
+        # 提取每个样式的XML
         for style_key, style_id in style_ids.items():
             if style_id:
                 try:
                     style_type = style_type_map.get(style_key)
-                    style_info = extract_style_from_styles_xml(styles_xml, style_id, style_type)
+                    style_xml = extract_style_from_styles_xml(styles_xml, style_id, style_type)
                     
-                    if style_info:
-                        result[style_key] = style_info
-                        result["all_styles"].append(style_info)
-                        
-                        # 如果样式有继承关系，递归提取基础样式
-                        if style_info.get("based_on"):
-                            based_on_id = style_info["based_on"]
-                            try:
-                                based_on_info = extract_style_from_styles_xml(
-                                    styles_xml, based_on_id, style_type
-                                )
-                                if based_on_info:
-                                    style_info["based_on_style"] = based_on_info
-                                    result["all_styles"].append(based_on_info)
-                            except Exception as e:
-                                import logging
-                                logger = logging.getLogger(__name__)
-                                logger.warning(f"提取基础样式失败 (style_id={based_on_id}): {e}")
+                    if style_xml:
+                        result[style_key] = style_xml
                 except Exception as e:
                     import logging
                     logger = logging.getLogger(__name__)
@@ -305,38 +335,6 @@ def extract_styles_from_document_xml_fragment(
         logger.error(f"extract_styles_from_document_xml_fragment 执行失败: {e}", exc_info=True)
     
     return result
-
-
-def get_styles_xml_from_docx_file(file_content: bytes) -> Optional[str]:
-    """
-    从docx文件内容（bytes）中提取styles.xml
-    
-    Args:
-        file_content: docx文件的二进制内容
-        
-    Returns:
-        styles.xml的字符串内容，如果未找到则返回None
-    """
-    try:
-        from zipfile import ZipFile
-        from io import BytesIO
-        
-        # 将文件内容转换为BytesIO对象
-        file_stream = BytesIO(file_content)
-        
-        with ZipFile(file_stream, 'r') as docx:
-            # 检查styles.xml是否存在
-            if 'word/styles.xml' in docx.namelist():
-                styles_xml = docx.read('word/styles.xml').decode('utf-8')
-                return styles_xml
-            else:
-                return None
-                
-    except Exception as e:
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"从docx文件提取styles.xml失败: {e}", exc_info=True)
-        return None
 
 
 def get_styles_xml_from_docx_stream(file_stream) -> Optional[str]:

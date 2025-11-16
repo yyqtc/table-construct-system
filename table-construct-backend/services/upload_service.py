@@ -14,6 +14,7 @@ from fastapi import UploadFile, HTTPException
 from docx import Document
 from docx.oxml.text.paragraph import CT_P
 from docx.text.paragraph import Paragraph
+from utils.mongo import collection as mongo_collection
 
 from models import UploadResponse
 from database import get_collection, get_model
@@ -24,6 +25,8 @@ from utils.docx_utils import (
     extract_paragraphs_xml,
     get_styles_xml_from_docx_stream,
     extract_styles_from_document_xml_fragment,
+    extract_style_from_styles_xml,
+    get_default_style_id,
 )
 
 from utils.coze import async_coze
@@ -194,17 +197,74 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                             text_content = ','.join([text.strip() for text in text_matches if text.strip()])
 
                     # 提取样式信息（如果styles_xml存在）
+                    table_style_info = {
+                        "paragraph_style": None,
+                        "table_style": None,
+                        "run_style": None,
+                        "cell_style": None,
+                    }
+                    
                     if styles_xml:
                         try:
+                            # 从XML内容中提取样式XML
                             table_style_info = extract_styles_from_document_xml_fragment(xml_content, styles_xml)
+                            
+                            # 如果段落样式为None，尝试从段落对象中提取
+                            if table_style_info.get("paragraph_style") is None:
+                                para_style_found = False
+                                
+                                # 方法1: 检查段落对象是否有样式
+                                for para in paragraphs_before_objs + paragraphs_after_objs:
+                                    if hasattr(para, "style") and para.style is not None:
+                                        try:
+                                            style_id = para.style.style_id if hasattr(para.style, "style_id") else None
+                                            style_name = para.style.name if hasattr(para.style, "name") else None
+                                            
+                                            logger.info(f"段落对象样式: style_id={style_id}, style_name={style_name}")
+                                            
+                                            if style_id:
+                                                # 从styles.xml中提取段落样式XML
+                                                para_style_xml = extract_style_from_styles_xml(
+                                                    styles_xml, style_id, "paragraph"
+                                                )
+                                                if para_style_xml:
+                                                    table_style_info["paragraph_style"] = para_style_xml
+                                                    logger.info(f"从段落对象提取到段落样式: {style_id} ({style_name})")
+                                                    para_style_found = True
+                                                    break
+                                        except Exception as e:
+                                            logger.warning(f"从段落对象提取样式失败: {e}")
+                                
+                                # 方法2: 如果段落对象也没有样式，使用默认段落样式（通常是 "Normal" 或 "1"）
+                                if not para_style_found:
+                                    try:
+                                        default_para_style_id = get_default_style_id(styles_xml, "paragraph")
+                                        if default_para_style_id:
+                                            para_style_xml = extract_style_from_styles_xml(
+                                                styles_xml, default_para_style_id, "paragraph"
+                                            )
+                                            if para_style_xml:
+                                                table_style_info["paragraph_style"] = para_style_xml
+                                                logger.info(f"使用默认段落样式: {default_para_style_id}")
+                                    except Exception as e:
+                                        logger.warning(f"获取默认段落样式失败: {e}")
+                            
+                            logger.info(f"提取的样式信息: paragraph_style={table_style_info.get('paragraph_style') is not None}, "
+                                      f"table_style={table_style_info.get('table_style') is not None}")
                         except Exception as e:
                             logger.error(f"提取样式信息失败: {e}", exc_info=True)
-                            table_style_info = {}
-                    else:
-                        table_style_info = {}
+                            table_style_info = {
+                                "paragraph_style": None,
+                                "table_style": None,
+                                "run_style": None,
+                                "cell_style": None,
+                            }
                 except Exception as e:
                     logger.error(f"表格提取失败: {e}", exc_info=True)
                     continue
+
+                logger.info(f"table_style_info: paragraph_style={table_style_info.get('paragraph_style') is not None}, "
+                          f"table_style={table_style_info.get('table_style') is not None}")
 
                 # 生成唯一的表格ID
                 table_id = str(uuid.uuid4())
@@ -212,17 +272,40 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                 # 获取创建时间
                 creation_time = datetime.now().isoformat()
 
+                # 将样式信息存储到MongoDB
+                mongo_id = None
+                try:
+                    if mongo_collection:
+                        style_document = {
+                            "table_id": table_id,
+                            "filename": file.filename,
+                            "table_index": table_index,
+                            "styles": table_style_info,  # 存储所有样式XML
+                            "creation_time": creation_time,
+                        }
+                        result = mongo_collection.insert_one(style_document)
+                        mongo_id = str(result.inserted_id)
+                        logger.info(f"样式信息已存储到MongoDB: table_id={table_id}, mongo_id={mongo_id}")
+                    else:
+                        logger.warning("MongoDB collection未初始化，跳过样式信息存储")
+                except Exception as e:
+                    logger.error(f"存储样式信息到MongoDB失败: {e}", exc_info=True)
+                    # 继续处理，不中断上传流程
+
                 # 构建metadata结构
                 # 注意：ChromaDB metadata 只支持基本类型（str, int, float, bool, None）
-                # 嵌套字典需要序列化为 JSON 字符串
+                # 样式信息已存储到MongoDB，metadata中存储table_id和mongo_id用于关联
                 metadata = {
                     "table_id": table_id,
                     "filename": file.filename,
                     "file_size": str(file_size),  # 确保是字符串类型
                     "table_index": str(table_index),  # 确保是字符串类型
-                    "style_info": json.dumps(table_style_info, ensure_ascii=False),  # 序列化为JSON字符串
                     "creation_time": creation_time,
                 }
+                
+                # 如果MongoDB插入成功，将mongo_id添加到metadata中
+                if mongo_id:
+                    metadata["mongo_id"] = mongo_id
 
                 # 向量化文本内容
                 try:
