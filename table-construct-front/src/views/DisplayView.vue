@@ -164,44 +164,46 @@
           </el-button>
         </div>
 
-        <div v-if="selectedTables.length > 0" class="selected-list">
-          <draggable
-            v-model="selectedTables"
-            :animation="200"
-            handle=".drag-handle"
-            @end="onDragEnd"
-          >
-            <div
-              v-for="(tableItem, index) in selectedTables"
-              :key="tableItem.uniqueId"
-              class="selected-table-item"
-              :class="{ active: currentTableId === tableItem.tableId }"
-              @click="switchTable(tableItem.tableId)"
+        <div v-if="selectedTables.length > 0" class="selected-content-wrapper">
+          <div class="selected-list">
+            <draggable
+              v-model="selectedTables"
+              :animation="200"
+              handle=".drag-handle"
+              @end="onDragEnd"
             >
-              <div class="selected-table-header">
-                <div class="selected-table-info">
-                  <i class="el-icon-rank drag-handle"></i>
-                  <span class="selected-table-number">表格 {{ index + 1 }}</span>
+              <div
+                v-for="(tableItem, index) in selectedTables"
+                :key="tableItem.uniqueId"
+                class="selected-table-item"
+                :class="{ active: currentTableId === tableItem.id }"
+                @click="switchTable(tableItem.id)"
+              >
+                <div class="selected-table-header">
+                  <div class="selected-table-info">
+                    <i class="el-icon-rank drag-handle"></i>
+                    <span class="selected-table-number">表格 {{ index + 1 }}</span>
+                  </div>
+                  <el-button
+                    type="danger"
+                    icon="el-icon-delete"
+                    size="mini"
+                    circle
+                    @click.stop="removeSelectedByIndex(index)"
+                  ></el-button>
                 </div>
-                <el-button
-                  type="danger"
-                  icon="el-icon-delete"
-                  size="mini"
-                  circle
-                  @click.stop="removeSelectedByIndex(index)"
-                ></el-button>
+                
+                <div class="selected-table-preview">
+                  <iframe
+                    v-if="getSelectedTablePdfUrl(tableItem)"
+                    :src="getSelectedTablePdfUrl(tableItem)"
+                    class="selected-preview-iframe"
+                  ></iframe>
+                  <div v-else class="selected-preview-empty">无预览</div>
+                </div>
               </div>
-              
-              <div class="selected-table-preview">
-                <iframe
-                  v-if="getSelectedTablePdfUrl(tableItem)"
-                  :src="getSelectedTablePdfUrl(tableItem)"
-                  class="selected-preview-iframe"
-                ></iframe>
-                <div v-else class="selected-preview-empty">无预览</div>
-              </div>
-            </div>
-          </draggable>
+            </draggable>
+          </div>
 
           <div class="download-section">
             <el-button
@@ -240,8 +242,13 @@
 
 <script>
 import { queryTables, downloadTables } from '../api'
-import { getTableOrder, updateTableOrder, clearTableIds, getAllTableIds, setStorage, StorageType, TABLE_IDS_KEY } from '../utils/storage'
+import { getTableOrder, updateTableOrder, clearTableIds, getAllTableIds, setStorage, getStorage, StorageType, TABLE_IDS_KEY } from '../utils/storage'
 import draggable from 'vuedraggable'
+
+// 查询结果缓存键名
+const QUERY_RESULT_CACHE_KEY = 'query_result_cache'
+// 已选表格完整信息存储键名
+const SELECTED_TABLES_ITEMS_KEY = 'selected_tables_items'
 
 export default {
   name: 'DisplayView',
@@ -278,8 +285,38 @@ export default {
       return this.getTablePdfUrl(this.currentTable)
     }
   },
+  watch: {
+    // 监听返回结果数的变化，更新缓存
+    topK(newVal) {
+      if (newVal && this.tableList.length > 0) {
+        // 如果有查询结果，更新缓存中的 topK
+        const cached = getStorage(QUERY_RESULT_CACHE_KEY, null, StorageType.SESSION)
+        if (cached) {
+          this.cacheQueryResult({
+            ...cached,
+            topK: newVal
+          })
+        }
+      }
+    },
+    // 监听搜索关键词的变化，更新缓存
+    searchKeyword(newVal) {
+      if (newVal && this.tableList.length > 0) {
+        // 如果有查询结果，更新缓存中的 keyword
+        const cached = getStorage(QUERY_RESULT_CACHE_KEY, null, StorageType.SESSION)
+        if (cached) {
+          this.cacheQueryResult({
+            ...cached,
+            keyword: newVal
+          })
+        }
+      }
+    }
+  },
   mounted() {
     this.loadSelectedTables()
+    // 从 sessionStorage 恢复查询结果
+    this.loadCachedQueryResult()
   },
   methods: {
     async handleSearch() {
@@ -301,7 +338,15 @@ export default {
         
         this.tableList = response || []
         
-        // 同步已选表格（基于存储的 tableIds）
+        // 缓存查询结果到 sessionStorage
+        this.cacheQueryResult({
+          keyword: this.searchKeyword,
+          topK: this.topK,
+          results: this.tableList,
+          timestamp: Date.now()
+        })
+        
+        // 同步已选表格（从存储中加载完整的表格项信息）
         this.syncSelectedTableIds()
         
         if (this.tableList.length > 0) {
@@ -333,18 +378,24 @@ export default {
       // 生成唯一标识符（允许同一个表格选择多次）
       const uniqueId = `${tableId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
       
-      // 添加到已选列表
+      // 创建完整的表格项（包含所有信息）
       const tableItem = {
         uniqueId: uniqueId,
-        tableId: tableId,
+        id: table.id,
+        html: table.html,
+        xml: table.xml,
         similarity: table.similarity,
         metadata: table.metadata
       }
       
       this.selectedTables.push(tableItem)
       
-      // 保持存储逻辑不变（仍然使用 table_id，允许重复）
-      // 直接添加到存储，不检查重复
+      // 保存完整的表格项信息到存储
+      const storedItems = getStorage(SELECTED_TABLES_ITEMS_KEY, [], StorageType.SESSION)
+      storedItems.push(tableItem)
+      setStorage(SELECTED_TABLES_ITEMS_KEY, storedItems, StorageType.SESSION)
+      
+      // 同时保持 table_id 的存储（用于向后兼容和下载功能）
       const ids = getAllTableIds()
       ids.push(tableId)
       setStorage(TABLE_IDS_KEY, ids, StorageType.SESSION)
@@ -352,8 +403,6 @@ export default {
       const order = getTableOrder()
       order.push(tableId)
       updateTableOrder(order)
-      
-      this.syncSelectedTableIds()
       
       this.$message.success('已添加到列表')
     },
@@ -365,7 +414,15 @@ export default {
       // 从 selectedTables 中移除
       this.selectedTables.splice(index, 1)
       
-      // 从存储中移除对应位置的 tableId（保持存储逻辑不变）
+      // 从存储中移除对应的表格项
+      const storedItems = getStorage(SELECTED_TABLES_ITEMS_KEY, [], StorageType.SESSION)
+      const itemIndex = storedItems.findIndex(item => item.uniqueId === tableItem.uniqueId)
+      if (itemIndex !== -1) {
+        storedItems.splice(itemIndex, 1)
+        setStorage(SELECTED_TABLES_ITEMS_KEY, storedItems, StorageType.SESSION)
+      }
+      
+      // 从存储中移除对应位置的 tableId（保持向后兼容）
       const order = getTableOrder()
       if (index < order.length) {
         order.splice(index, 1)
@@ -373,14 +430,12 @@ export default {
         
         // 同时更新 TABLE_IDS_KEY
         const ids = getAllTableIds()
-        const tableIdIndex = ids.indexOf(tableItem.tableId)
+        const tableIdIndex = ids.indexOf(tableItem.id)
         if (tableIdIndex !== -1) {
           ids.splice(tableIdIndex, 1)
           setStorage(TABLE_IDS_KEY, ids, StorageType.SESSION)
         }
       }
-      
-      this.syncSelectedTableIds()
       
       if (this.currentSelectedIndex === index) {
         this.currentSelectedIndex = -1
@@ -391,12 +446,16 @@ export default {
       this.$message.success('已移除')
     },
     isSelected(tableId) {
-      return this.selectedTableIds.includes(tableId)
+      return this.selectedTables.some(item => item.id === tableId)
     },
     onDragEnd() {
-      // 拖拽后更新存储顺序（保持存储逻辑不变）
-      const tableIds = this.selectedTables.map(item => item.tableId)
+      // 拖拽后更新存储顺序
+      const tableIds = this.selectedTables.map(item => item.id)
       updateTableOrder(tableIds)
+      
+      // 更新存储中的表格项顺序
+      setStorage(SELECTED_TABLES_ITEMS_KEY, this.selectedTables, StorageType.SESSION)
+      
       this.$message.success('顺序已更新')
     },
     clearSelected() {
@@ -406,6 +465,8 @@ export default {
         type: 'warning'
       }).then(() => {
         clearTableIds()
+        // 清空表格项存储
+        setStorage(SELECTED_TABLES_ITEMS_KEY, [], StorageType.SESSION)
         this.selectedTableIds = []
         this.selectedTables = []
         this.currentSelectedIndex = -1
@@ -413,57 +474,78 @@ export default {
       }).catch(() => {})
     },
     syncSelectedTableIds() {
+      // 从存储中加载完整的表格项信息
+      const storedItems = getStorage(SELECTED_TABLES_ITEMS_KEY, [], StorageType.SESSION)
       const order = getTableOrder()
       this.selectedTableIds = order
       
-      // 如果 selectedTables 的数量与 order 不一致，需要重建
-      if (this.selectedTables.length !== order.length) {
-        // 按照存储顺序重建 selectedTables
-        this.selectedTables = order.map((tableId, index) => {
-          // 尝试从现有的 selectedTables 中找到对应的项（保持 uniqueId）
-          const existingItem = this.selectedTables.find(item => 
-            item.tableId === tableId && 
-            // 简单匹配：如果位置相同或者是同一个 tableId 的第一个匹配项
-            (index < this.selectedTables.length && this.selectedTables[index].tableId === tableId)
-          )
-          
-          if (existingItem) {
-            // 更新信息（如果表格在当前搜索结果中）
-            const table = this.tableList.find(t => t.id === tableId)
-            if (table) {
-              existingItem.similarity = table.similarity
-              existingItem.metadata = table.metadata
-            }
-            return existingItem
-          } else {
-            // 创建新的表格项
-            const table = this.tableList.find(t => t.id === tableId)
+      if (storedItems.length > 0 && storedItems.length === order.length) {
+        // 如果存储中有完整的表格项且数量匹配，按照 order 的顺序重新排列
+        const itemMap = new Map()
+        storedItems.forEach(item => {
+          if (!itemMap.has(item.id)) {
+            itemMap.set(item.id, [])
+          }
+          itemMap.get(item.id).push(item)
+        })
+        
+        // 按照 order 的顺序重建 selectedTables
+        const orderedItems = []
+        const usedUniqueIds = new Set()
+        
+        order.forEach(tableId => {
+          const items = itemMap.get(tableId) || []
+          // 找到第一个未使用的项
+          const item = items.find(i => !usedUniqueIds.has(i.uniqueId))
+          if (item) {
+            usedUniqueIds.add(item.uniqueId)
+            orderedItems.push(item)
+          } else if (items.length > 0) {
+            // 如果所有项都已使用，使用第一个（允许重复）
+            usedUniqueIds.add(items[0].uniqueId)
+            orderedItems.push(items[0])
+          }
+        })
+        
+        this.selectedTables = orderedItems
+      } else if (storedItems.length > 0) {
+        // 如果存储中有项但数量不匹配，使用存储的项
+        this.selectedTables = storedItems
+        // 更新 order 以匹配存储的项
+        const newOrder = storedItems.map(item => item.id)
+        updateTableOrder(newOrder)
+        this.selectedTableIds = newOrder
+      } else if (order.length > 0) {
+        // 如果只有 order 没有存储的项，尝试从当前搜索结果中重建
+        this.selectedTables = order.map((tableId) => {
+          const table = this.tableList.find(t => t.id === tableId)
+          if (table) {
             const uniqueId = `${tableId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
             return {
               uniqueId: uniqueId,
-              tableId: tableId,
-              similarity: table ? table.similarity : undefined,
-              metadata: table ? table.metadata : {}
+              id: table.id,
+              html: table.html,
+              xml: table.xml,
+              similarity: table.similarity,
+              metadata: table.metadata
             }
           }
-        })
+          return null
+        }).filter(item => item !== null)
+        
+        // 保存到存储
+        if (this.selectedTables.length > 0) {
+          setStorage(SELECTED_TABLES_ITEMS_KEY, this.selectedTables, StorageType.SESSION)
+        }
       } else {
-        // 数量一致，只需要更新信息
-        this.selectedTables.forEach((item, index) => {
-          if (order[index] && order[index] === item.tableId) {
-            const table = this.tableList.find(t => t.id === item.tableId)
-            if (table) {
-              item.similarity = table.similarity
-              item.metadata = table.metadata
-            }
-          }
-        })
+        this.selectedTables = []
       }
     },
     loadSelectedTables() {
       const order = getTableOrder()
       this.selectedTableIds = order
-      // selectedTables 会在 syncSelectedTableIds 中同步
+      // 从存储中加载完整的表格项信息
+      this.syncSelectedTableIds()
     },
     async handleDownload() {
       if (this.selectedTableIds.length === 0) {
@@ -582,6 +664,27 @@ export default {
     },
     goToUpload() {
       this.$router.push('/upload')
+    },
+    cacheQueryResult(cacheData) {
+      // 缓存查询结果到 sessionStorage
+      setStorage(QUERY_RESULT_CACHE_KEY, cacheData, StorageType.SESSION)
+    },
+    loadCachedQueryResult() {
+      // 从 sessionStorage 加载缓存的查询结果
+      const cached = getStorage(QUERY_RESULT_CACHE_KEY, null, StorageType.SESSION)
+      if (cached && cached.results && cached.results.length > 0) {
+        this.searchKeyword = cached.keyword || ''
+        this.topK = cached.topK || 10
+        this.tableList = cached.results || []
+        
+        // 恢复当前选中的表格
+        if (this.tableList.length > 0) {
+          this.currentTableId = this.tableList[0].id
+        }
+        
+        // 同步已选表格
+        this.syncSelectedTableIds()
+      }
     }
   }
 }
@@ -670,8 +773,15 @@ export default {
   position: sticky;
   top: 20px;
   height: fit-content;
-  max-height: calc(100vh - 100px);
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.selected-sidebar >>> .el-card__body {
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+  height: 100%;
 }
 
 .display-header {
@@ -849,14 +959,21 @@ export default {
   gap: 8px;
 }
 
+.selected-content-wrapper {
+  display: flex;
+  flex-direction: column;
+  height: 600px;
+  max-height: 600px;
+}
+
 .selected-list {
   display: flex;
   flex-direction: column;
   gap: 15px;
-  margin-bottom: 20px;
-  max-height: calc(100vh - 300px);
+  flex: 1;
   overflow-y: auto;
   padding: 5px;
+  margin-bottom: 0;
 }
 
 .selected-table-item {
@@ -907,10 +1024,6 @@ export default {
   color: #303133;
 }
 
-.selected-similarity-tag {
-  font-size: 11px;
-}
-
 .selected-table-preview {
   width: 100%;
   height: 150px;
@@ -940,9 +1053,12 @@ export default {
 }
 
 .download-section {
-  margin-top: 20px;
-  padding-top: 20px;
+  margin-top: auto;
+  padding-top: 15px;
+  padding-bottom: 0;
   border-top: 1px solid #e4e7ed;
+  background: #fff;
+  flex-shrink: 0;
 }
 
 .download-btn {
@@ -1033,6 +1149,11 @@ export default {
     position: static;
     max-height: none;
   }
+
+  .selected-content-wrapper {
+    height: auto;
+    max-height: none;
+  }
 }
 
 @media (max-width: 768px) {
@@ -1051,6 +1172,11 @@ export default {
 
   .table-wrapper {
     height: 400px;
+  }
+
+  .selected-content-wrapper {
+    height: 400px;
+    max-height: 400px;
   }
 }
 </style>
