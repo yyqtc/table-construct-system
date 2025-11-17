@@ -548,6 +548,7 @@ export default {
       this.syncSelectedTableIds()
     },
     async handleDownload() {
+      this.selectedTableIds = this.selectedTables.map(item => item.id)
       if (this.selectedTableIds.length === 0) {
         this.$message.warning('请先选择要下载的表格')
         return

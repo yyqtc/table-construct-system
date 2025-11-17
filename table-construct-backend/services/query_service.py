@@ -9,9 +9,6 @@ import os
 from typing import Optional, List
 from models import QueryResponse
 from database import get_collection, get_model
-from utils.xml_converter import xml_to_html, html_to_xml
-from utils.mongo import collection as mongo_collection
-from utils.docx_utils import create_docx_with_table_and_styles
 
 logger = logging.getLogger(__name__)
 
