@@ -58,7 +58,7 @@
     <!-- 搜索结果 -->
     <div v-if="hasResults" class="results-container">
       <!-- 主展示区 -->
-      <el-card class="main-display-card" shadow="hover">
+      <el-card class="main-display-card" shadow="hover" v-loading="searching" element-loading-text="正在加载...">
         <div slot="header" class="display-header">
           <div class="header-left">
             <h3>
@@ -71,22 +71,22 @@
           </div>
           <div class="header-actions">
             <el-button
-              :type="isSelected(currentTableId) ? 'success' : 'primary'"
-              :icon="isSelected(currentTableId) ? 'el-icon-check' : 'el-icon-plus'"
+              type="primary"
+              icon="el-icon-plus"
               size="small"
-              @click="toggleSelect(currentTableId)"
+              @click="addToSelected(currentTableId)"
               :disabled="!currentTableId"
             >
-              {{ isSelected(currentTableId) ? '已选择' : '添加到列表' }}
+              添加到列表
             </el-button>
           </div>
         </div>
         
         <div class="table-display-wrapper">
-          <div v-if="currentTableHtml" class="table-container">
+          <div v-if="currentTablePdfUrl" class="table-container">
             <div class="table-wrapper">
               <iframe
-                :srcdoc="getTableHtmlWithStyle(currentTableHtml)"
+                :src="currentTablePdfUrl"
                 class="table-iframe"
               ></iframe>
             </div>
@@ -99,7 +99,7 @@
       </el-card>
 
       <!-- 结果列表 -->
-      <el-card class="results-list-card" shadow="hover">
+      <el-card class="results-list-card" shadow="hover" v-loading="searching" element-loading-text="正在加载...">
         <div slot="header" class="list-header">
           <h3>
             <i class="el-icon-menu"></i>
@@ -112,7 +112,7 @@
             v-for="(table, index) in tableList"
             :key="table.id"
             class="table-item"
-            :class="{ active: currentTableId === table.id, selected: isSelected(table.id) }"
+            :class="{ active: currentTableId === table.id }"
             @click="switchTable(table.id)"
           >
             <div class="table-item-header">
@@ -127,18 +127,18 @@
                 </el-tag>
               </div>
               <el-button
-                :type="isSelected(table.id) ? 'success' : 'default'"
-                :icon="isSelected(table.id) ? 'el-icon-check' : 'el-icon-plus'"
+                type="primary"
+                icon="el-icon-plus"
                 size="mini"
                 circle
-                @click.stop="toggleSelect(table.id)"
+                @click.stop="addToSelected(table.id)"
               ></el-button>
             </div>
             
             <div class="table-preview">
               <iframe
-                v-if="table.html"
-                :srcdoc="getTableHtmlWithStyle(table.html)"
+                v-if="getTablePdfUrl(table)"
+                :src="getTablePdfUrl(table)"
                 class="preview-iframe"
               ></iframe>
               <div v-else class="preview-empty">无预览</div>
@@ -152,10 +152,10 @@
         <div slot="header" class="sidebar-header">
           <h3>
             <i class="el-icon-shopping-cart-full"></i>
-            已选表格 ({{ selectedTableIds.length }})
+            已选表格 ({{ selectedTables.length }})
           </h3>
           <el-button
-            v-if="selectedTableIds.length > 0"
+            v-if="selectedTables.length > 0"
             type="text"
             size="small"
             @click="clearSelected"
@@ -164,53 +164,44 @@
           </el-button>
         </div>
 
-        <div v-if="selectedTableIds.length > 0" class="selected-list">
+        <div v-if="selectedTables.length > 0" class="selected-list">
           <draggable
-            v-model="selectedTableIds"
+            v-model="selectedTables"
             :animation="200"
             handle=".drag-handle"
             @end="onDragEnd"
           >
             <div
-              v-for="(tableId, index) in selectedTableIds"
-              :key="tableId"
-              class="selected-item"
-              :class="{ 'item-active': currentSelectedIndex === index }"
-              @click="currentSelectedIndex = index"
+              v-for="(tableItem, index) in selectedTables"
+              :key="tableItem.uniqueId"
+              class="selected-table-item"
+              :class="{ active: currentTableId === tableItem.tableId }"
+              @click="switchTable(tableItem.tableId)"
             >
-              <div class="item-content">
-                <i class="el-icon-rank drag-handle"></i>
-                <span class="item-number">{{ index + 1 }}</span>
-                <span class="item-id">{{ getTableShortId(tableId) }}</span>
+              <div class="selected-table-header">
+                <div class="selected-table-info">
+                  <i class="el-icon-rank drag-handle"></i>
+                  <span class="selected-table-number">表格 {{ index + 1 }}</span>
+                </div>
+                <el-button
+                  type="danger"
+                  icon="el-icon-delete"
+                  size="mini"
+                  circle
+                  @click.stop="removeSelectedByIndex(index)"
+                ></el-button>
               </div>
-              <el-button
-                type="danger"
-                icon="el-icon-delete"
-                size="mini"
-                circle
-                @click.stop="removeSelected(tableId)"
-              ></el-button>
+              
+              <div class="selected-table-preview">
+                <iframe
+                  v-if="getSelectedTablePdfUrl(tableItem)"
+                  :src="getSelectedTablePdfUrl(tableItem)"
+                  class="selected-preview-iframe"
+                ></iframe>
+                <div v-else class="selected-preview-empty">无预览</div>
+              </div>
             </div>
           </draggable>
-
-          <div class="order-controls">
-            <el-button
-              size="small"
-              icon="el-icon-arrow-up"
-              @click="moveUp"
-              :disabled="currentSelectedIndex <= 0"
-            >
-              上移
-            </el-button>
-            <el-button
-              size="small"
-              icon="el-icon-arrow-down"
-              @click="moveDown"
-              :disabled="currentSelectedIndex >= selectedTableIds.length - 1 || currentSelectedIndex < 0"
-            >
-              下移
-            </el-button>
-          </div>
 
           <div class="download-section">
             <el-button
@@ -221,7 +212,7 @@
               :loading="downloading"
               class="download-btn"
             >
-              {{ downloading ? '下载中...' : `下载文档 (${selectedTableIds.length})` }}
+              {{ downloading ? '下载中...' : `下载文档 (${selectedTables.length})` }}
             </el-button>
           </div>
         </div>
@@ -244,22 +235,12 @@
         </div>
       </el-card>
     </div>
-
-    <!-- 加载状态 -->
-    <div v-if="searching" class="loading-state">
-      <el-card shadow="never" class="loading-card">
-        <div class="loading-content">
-          <i class="el-icon-loading"></i>
-          <p>正在搜索...</p>
-        </div>
-      </el-card>
-    </div>
   </div>
 </template>
 
 <script>
 import { queryTables, downloadTables } from '../api'
-import { getTableOrder, addTableId, removeTableId, updateTableOrder, clearTableIds } from '../utils/storage'
+import { getTableOrder, updateTableOrder, clearTableIds, getAllTableIds, setStorage, StorageType, TABLE_IDS_KEY } from '../utils/storage'
 import draggable from 'vuedraggable'
 
 export default {
@@ -272,7 +253,8 @@ export default {
       searchKeyword: '',
       tableList: [],
       currentTableId: null,
-      selectedTableIds: [],
+      selectedTableIds: [], // 保持向后兼容，用于存储逻辑
+      selectedTables: [], // 新的数据结构，包含完整的表格信息
       currentSelectedIndex: -1,
       searching: false,
       downloading: false,
@@ -290,6 +272,10 @@ export default {
     },
     currentTableHtml() {
       return this.currentTable ? this.currentTable.html : null
+    },
+    currentTablePdfUrl() {
+      if (!this.currentTable) return null
+      return this.getTablePdfUrl(this.currentTable)
     }
   },
   mounted() {
@@ -315,6 +301,9 @@ export default {
         
         this.tableList = response || []
         
+        // 同步已选表格（基于存储的 tableIds）
+        this.syncSelectedTableIds()
+        
         if (this.tableList.length > 0) {
           this.currentTableId = this.tableList[0].id
           this.$message.success(`找到 ${this.tableList.length} 个相关表格`)
@@ -331,63 +320,83 @@ export default {
     switchTable(tableId) {
       this.currentTableId = tableId
     },
-    toggleSelect(tableId) {
+    addToSelected(tableId) {
       if (!tableId) return
       
-      const index = this.selectedTableIds.indexOf(tableId)
-      if (index > -1) {
-        removeTableId(tableId)
-        this.$message.info('已从列表移除')
-      } else {
-        addTableId(tableId)
-        this.$message.success('已添加到列表')
+      // 查找对应的表格对象
+      const table = this.tableList.find(t => t.id === tableId)
+      if (!table) {
+        this.$message.warning('表格不存在')
+        return
       }
+      
+      // 生成唯一标识符（允许同一个表格选择多次）
+      const uniqueId = `${tableId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+      
+      // 添加到已选列表
+      const tableItem = {
+        uniqueId: uniqueId,
+        tableId: tableId,
+        similarity: table.similarity,
+        metadata: table.metadata
+      }
+      
+      this.selectedTables.push(tableItem)
+      
+      // 保持存储逻辑不变（仍然使用 table_id，允许重复）
+      // 直接添加到存储，不检查重复
+      const ids = getAllTableIds()
+      ids.push(tableId)
+      setStorage(TABLE_IDS_KEY, ids, StorageType.SESSION)
+      
+      const order = getTableOrder()
+      order.push(tableId)
+      updateTableOrder(order)
+      
       this.syncSelectedTableIds()
+      
+      this.$message.success('已添加到列表')
+    },
+    removeSelectedByIndex(index) {
+      if (index < 0 || index >= this.selectedTables.length) return
+      
+      const tableItem = this.selectedTables[index]
+      
+      // 从 selectedTables 中移除
+      this.selectedTables.splice(index, 1)
+      
+      // 从存储中移除对应位置的 tableId（保持存储逻辑不变）
+      const order = getTableOrder()
+      if (index < order.length) {
+        order.splice(index, 1)
+        updateTableOrder(order)
+        
+        // 同时更新 TABLE_IDS_KEY
+        const ids = getAllTableIds()
+        const tableIdIndex = ids.indexOf(tableItem.tableId)
+        if (tableIdIndex !== -1) {
+          ids.splice(tableIdIndex, 1)
+          setStorage(TABLE_IDS_KEY, ids, StorageType.SESSION)
+        }
+      }
+      
+      this.syncSelectedTableIds()
+      
+      if (this.currentSelectedIndex === index) {
+        this.currentSelectedIndex = -1
+      } else if (this.currentSelectedIndex > index) {
+        this.currentSelectedIndex = this.currentSelectedIndex - 1
+      }
+      
+      this.$message.success('已移除')
     },
     isSelected(tableId) {
       return this.selectedTableIds.includes(tableId)
     },
-    removeSelected(tableId) {
-      const index = this.selectedTableIds.indexOf(tableId)
-      if (index > -1) {
-        removeTableId(tableId)
-        if (this.currentSelectedIndex === index) {
-          this.currentSelectedIndex = -1
-        } else if (this.currentSelectedIndex > index) {
-          this.currentSelectedIndex = this.currentSelectedIndex - 1
-        }
-        this.syncSelectedTableIds()
-        this.$message.success('已移除')
-      }
-    },
-    moveUp() {
-      if (this.currentSelectedIndex <= 0 || this.currentSelectedIndex >= this.selectedTableIds.length) {
-        return
-      }
-      const newOrder = [...this.selectedTableIds]
-      const temp = newOrder[this.currentSelectedIndex]
-      newOrder[this.currentSelectedIndex] = newOrder[this.currentSelectedIndex - 1]
-      newOrder[this.currentSelectedIndex - 1] = temp
-      updateTableOrder(newOrder)
-      this.currentSelectedIndex = this.currentSelectedIndex - 1
-      this.syncSelectedTableIds()
-      this.$message.success('已上移')
-    },
-    moveDown() {
-      if (this.currentSelectedIndex < 0 || this.currentSelectedIndex >= this.selectedTableIds.length - 1) {
-        return
-      }
-      const newOrder = [...this.selectedTableIds]
-      const temp = newOrder[this.currentSelectedIndex]
-      newOrder[this.currentSelectedIndex] = newOrder[this.currentSelectedIndex + 1]
-      newOrder[this.currentSelectedIndex + 1] = temp
-      updateTableOrder(newOrder)
-      this.currentSelectedIndex = this.currentSelectedIndex + 1
-      this.syncSelectedTableIds()
-      this.$message.success('已下移')
-    },
     onDragEnd() {
-      updateTableOrder(this.selectedTableIds)
+      // 拖拽后更新存储顺序（保持存储逻辑不变）
+      const tableIds = this.selectedTables.map(item => item.tableId)
+      updateTableOrder(tableIds)
       this.$message.success('顺序已更新')
     },
     clearSelected() {
@@ -398,6 +407,7 @@ export default {
       }).then(() => {
         clearTableIds()
         this.selectedTableIds = []
+        this.selectedTables = []
         this.currentSelectedIndex = -1
         this.$message.success('已清空')
       }).catch(() => {})
@@ -405,10 +415,55 @@ export default {
     syncSelectedTableIds() {
       const order = getTableOrder()
       this.selectedTableIds = order
+      
+      // 如果 selectedTables 的数量与 order 不一致，需要重建
+      if (this.selectedTables.length !== order.length) {
+        // 按照存储顺序重建 selectedTables
+        this.selectedTables = order.map((tableId, index) => {
+          // 尝试从现有的 selectedTables 中找到对应的项（保持 uniqueId）
+          const existingItem = this.selectedTables.find(item => 
+            item.tableId === tableId && 
+            // 简单匹配：如果位置相同或者是同一个 tableId 的第一个匹配项
+            (index < this.selectedTables.length && this.selectedTables[index].tableId === tableId)
+          )
+          
+          if (existingItem) {
+            // 更新信息（如果表格在当前搜索结果中）
+            const table = this.tableList.find(t => t.id === tableId)
+            if (table) {
+              existingItem.similarity = table.similarity
+              existingItem.metadata = table.metadata
+            }
+            return existingItem
+          } else {
+            // 创建新的表格项
+            const table = this.tableList.find(t => t.id === tableId)
+            const uniqueId = `${tableId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+            return {
+              uniqueId: uniqueId,
+              tableId: tableId,
+              similarity: table ? table.similarity : undefined,
+              metadata: table ? table.metadata : {}
+            }
+          }
+        })
+      } else {
+        // 数量一致，只需要更新信息
+        this.selectedTables.forEach((item, index) => {
+          if (order[index] && order[index] === item.tableId) {
+            const table = this.tableList.find(t => t.id === item.tableId)
+            if (table) {
+              item.similarity = table.similarity
+              item.metadata = table.metadata
+            }
+          }
+        })
+      }
     },
     loadSelectedTables() {
       const order = getTableOrder()
       this.selectedTableIds = order
+      // selectedTables 会在 syncSelectedTableIds 中同步
     },
     async handleDownload() {
       if (this.selectedTableIds.length === 0) {
@@ -435,6 +490,7 @@ export default {
         // 清空列表并返回上传页
         clearTableIds()
         this.selectedTableIds = []
+        this.selectedTables = []
         this.currentSelectedIndex = -1
         
         setTimeout(() => {
@@ -490,6 +546,39 @@ export default {
         </body>
         </html>
       `
+    },
+    getTablePdfUrl(table) {
+      if (!table || !table.metadata || !table.metadata.pdf_path) {
+        return null
+      }
+      
+      // 从完整路径中提取文件名
+      // 例如: C:\Users\...\pdf\table_xxx.pdf -> table_xxx.pdf
+      const pdfPath = table.metadata.pdf_path
+      const fileName = pdfPath.split(/[/\\]/).pop() // 支持 Windows 和 Linux 路径分隔符
+      
+      if (!fileName) {
+        return null
+      }
+      
+      // 拼接 PDF 访问 URL
+      return `http://localhost/table-pdf/${fileName}`
+    },
+    getSelectedTablePdfUrl(tableItem) {
+      if (!tableItem || !tableItem.metadata || !tableItem.metadata.pdf_path) {
+        return null
+      }
+      
+      // 从完整路径中提取文件名
+      const pdfPath = tableItem.metadata.pdf_path
+      const fileName = pdfPath.split(/[/\\]/).pop()
+      
+      if (!fileName) {
+        return null
+      }
+      
+      // 拼接 PDF 访问 URL
+      return `http://localhost/table-pdf/${fileName}`
     },
     goToUpload() {
       this.$router.push('/upload')
@@ -763,32 +852,40 @@ export default {
 .selected-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 15px;
   margin-bottom: 20px;
+  max-height: calc(100vh - 300px);
+  overflow-y: auto;
+  padding: 5px;
 }
 
-.selected-item {
+.selected-table-item {
+  border: 2px solid #e4e7ed;
+  border-radius: 8px;
+  padding: 12px;
+  cursor: pointer;
+  transition: all 0.3s;
+  background: #fff;
+}
+
+.selected-table-item:hover {
+  border-color: #409EFF;
+  box-shadow: 0 2px 12px rgba(64, 158, 255, 0.2);
+}
+
+.selected-table-item.active {
+  border-color: #409EFF;
+  background: #ecf5ff;
+}
+
+.selected-table-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px;
-  background: #f5f7fa;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all 0.3s;
-  border: 2px solid transparent;
+  margin-bottom: 10px;
 }
 
-.selected-item:hover {
-  background: #e4e7ed;
-}
-
-.selected-item.item-active {
-  background: #ecf5ff;
-  border-color: #409EFF;
-}
-
-.item-content {
+.selected-table-info {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -801,33 +898,45 @@ export default {
   font-size: 16px;
 }
 
-.item-number {
-  display: inline-flex;
+.drag-handle:hover {
+  color: #409EFF;
+}
+
+.selected-table-number {
+  font-weight: 600;
+  color: #303133;
+}
+
+.selected-similarity-tag {
+  font-size: 11px;
+}
+
+.selected-table-preview {
+  width: 100%;
+  height: 150px;
+  border: 1px solid #e4e7ed;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #fafafa;
+}
+
+.selected-preview-iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  transform: scale(0.5);
+  transform-origin: top left;
+  width: 200%;
+  height: 200%;
+}
+
+.selected-preview-empty {
+  display: flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  background: #409EFF;
-  color: #fff;
-  border-radius: 50%;
+  height: 100%;
+  color: #c0c4cc;
   font-size: 12px;
-  font-weight: 600;
-}
-
-.item-id {
-  font-size: 12px;
-  color: #606266;
-  font-family: monospace;
-}
-
-.order-controls {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 20px;
-}
-
-.order-controls .el-button {
-  flex: 1;
 }
 
 .download-section {

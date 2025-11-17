@@ -68,7 +68,6 @@ async def query_tables(
             ids = results["ids"][0]
             distances = results["distances"][0] if "distances" in results else []
             metadatas = results["metadatas"][0] if "metadatas" in results else []
-            documents = results["documents"][0] if "documents" in results else []
 
             for i, table_id in enumerate(ids):
                 # 计算相似度（ChromaDB返回的是距离，相似度 = 1 - 距离）
@@ -80,57 +79,12 @@ async def query_tables(
                     continue
 
                 metadata = metadatas[i] if i < len(metadatas) else {}
-                document = documents[i] if i < len(documents) else ""
-
-                # 从MongoDB获取样式信息
-                style_info = None
-                if mongo_collection is not None:
-                    try:
-                        style_doc = mongo_collection.find_one({"table_id": table_id})
-                        if style_doc and "styles" in style_doc:
-                            style_info = style_doc["styles"]
-                    except Exception as e:
-                        logger.warning(f"从MongoDB获取样式信息失败: table_id={table_id}, error={e}")
-
-                # 将样式信息添加到metadata中
-                if style_info:
-                    metadata["style_info"] = style_info
-
-                # 创建临时DOCX文件（包含表格和样式）
-                temp_docx_path = None
-                try:
-                    if document:  # 如果有表格XML
-                        # 创建临时文件
-                        temp_fd, temp_docx_path = tempfile.mkstemp(suffix='.docx', prefix=f'table_{table_id}_')
-                        os.close(temp_fd)  # 关闭文件描述符，我们只需要路径
-                        
-                        # 创建DOCX文件
-                        styles_dict = style_info if style_info else {}
-
-                        success = create_docx_with_table_and_styles(
-                            document,  # 表格XML
-                            styles_dict,  # 样式字典
-                            temp_docx_path
-                        )
-                        
-                        if success:
-                            logger.info(f"临时DOCX文件创建成功: table_id={table_id}, path={temp_docx_path}")
-                        else:
-                            logger.warning(f"临时DOCX文件创建失败: table_id={table_id}")
-                            temp_docx_path = None
-                except Exception as e:
-                    logger.error(f"创建临时DOCX文件失败: table_id={table_id}, error={e}", exc_info=True)
-                    temp_docx_path = None
 
                 match_result = {
                     "table_id": table_id,
                     "similarity": round(similarity, 4),
                     "distance": round(distance, 4),
-                    "table_xml": document,
-                    "table_html": table_html,
-                    "table_xml_from_html": table_xml_from_html,
-                    "metadata": metadata,
-                    "temp_docx_path": temp_docx_path,  # 临时DOCX文件路径
+                    "metadata": metadata
                 }
                 matches.append(match_result)
 

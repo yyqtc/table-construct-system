@@ -13,33 +13,70 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 
 
+def double_spaces_in_preserve_text(xml_content: str) -> str:
+    """
+    将XML中 <w:t xml:space="preserve">   </w:t> 中的空格数量翻倍
+    
+    Args:
+        xml_content: XML字符串
+        
+    Returns:
+        处理后的XML字符串
+    """
+    import re
+    
+    def double_spaces(match):
+        """将匹配到的空格翻倍"""
+        full_tag = match.group(0)  # 完整的标签，如 <w:t xml:space="preserve">   </w:t>
+        tag_start = match.group(1)  # 标签开始部分，如 <w:t xml:space="preserve">
+        spaces = match.group(2)  # 空格内容
+        tag_end = match.group(3)  # 标签结束部分，如 </w:t>
+        
+        # 将空格数量翻倍
+        doubled_spaces = spaces * 2
+        
+        # 返回新的标签
+        return f"{tag_start}{doubled_spaces}{tag_end}"
+    
+    # 匹配 <w:t xml:space="preserve">空格</w:t> 模式
+    # 支持 xml:space="preserve" 或 xml:space='preserve'
+    pattern = r'(<w:t[^>]*xml:space=["\']preserve["\'][^>]*>)([ \u3000\t]+)(</w:t>)'
+    
+    # 替换所有匹配的空格
+    result = re.sub(pattern, double_spaces, xml_content, flags=re.IGNORECASE | re.DOTALL)
+    
+    return result
+
+
 def extract_table_xml(table: Table) -> str:
     """
-    提取表格的XML内容
+    提取表格的XML内容，并将 <w:t xml:space="preserve"> 中的空格翻倍
 
     Args:
         table: python-docx Table对象
 
     Returns:
-        表格的XML字符串
+        表格的XML字符串（空格已翻倍）
     """
     # 获取表格的底层XML元素
     tbl_element = table._tbl
+    
     return tbl_element.xml
 
 
 def extract_paragraph_xml(paragraph: Paragraph) -> str:
     """
-    提取段落的XML内容
+    提取段落的XML内容，并将 <w:t xml:space="preserve"> 中的空格翻倍
 
     Args:
         paragraph: python-docx Paragraph对象
 
     Returns:
-        段落的XML字符串
+        段落的XML字符串（空格已翻倍）
     """
     # 获取段落的底层XML元素
     para_element = paragraph._p
+    
     return para_element.xml
 
 

@@ -2,6 +2,8 @@
 文件上传服务
 """
 
+import os
+import tempfile
 import logging
 import uuid
 import json
@@ -11,6 +13,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from io import BytesIO
 from fastapi import UploadFile, HTTPException
+from pathlib import Path
 from docx import Document
 from docx.oxml.text.paragraph import CT_P
 from docx.text.paragraph import Paragraph
@@ -18,7 +21,7 @@ from utils.mongo import collection as mongo_collection
 
 from models import UploadResponse
 from database import get_collection, get_model
-from config import MAX_FILE_SIZE, COZE_SUMMARY_TABLE_WORKFLOW_ID, COZE_EXTRACT_PARA_WORKFLOW_ID
+from config import MAX_FILE_SIZE, COZE_SUMMARY_TABLE_WORKFLOW_ID, COZE_EXTRACT_PARA_WORKFLOW_ID, PDF_DIR_PATH, SOFFICE_PATH
 from utils.exceptions import HTTP_413_REQUEST_ENTITY_TOO_LARGE
 from utils.docx_utils import (
     extract_table_xml,
@@ -27,7 +30,10 @@ from utils.docx_utils import (
     extract_styles_from_document_xml_fragment,
     extract_style_from_styles_xml,
     get_default_style_id,
+    create_docx_with_table_and_styles,
+    double_spaces_in_preserve_text
 )
+from utils.subproccess import _execute_script_subprocess
 
 from utils.coze import async_coze
 
@@ -117,25 +123,6 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                 # 提取表格XML
                 table_xml = extract_table_xml(table)
                 
-                # 检查空格类型（用于调试）
-                def check_space_type(xml_str, label=""):
-                    """检查XML中的空格类型"""
-                    import re
-                    # 提取所有 <w:t> 标签中的文本
-                    text_matches = re.findall(r'<w:t[^>]*>(.*?)</w:t>', xml_str, re.DOTALL)
-                    for i, text in enumerate(text_matches):
-                        # 只检查只包含空白字符的文本节点（通常是下划线用的空格）
-                        if not text.strip() and text:  # 只包含空白字符
-                            has_fullwidth = '\u3000' in text
-                            has_halfwidth = '\u0020' in text
-                            space_count = len([c for c in text if c in ['\u0020', '\u3000']])
-                            if has_fullwidth:
-                                logger.info(f"{label} 文本节点 {i}: 包含全角空格 (U+3000) ⚠️, 空格数量={space_count}")
-                            elif has_halfwidth:
-                                logger.debug(f"{label} 文本节点 {i}: 包含普通空格 (U+0020), 空格数量={space_count}")
-                
-                check_space_type(table_xml, f"表格XML (table_index={table_index})")
-
                 # 处理样式继承
                 target_table_elem = table._tbl
                 body = doc.element.body
@@ -194,6 +181,7 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                     para_extract_wrapper = json.loads(para_extract_wrapper.data)
                     xml_content = para_extract_wrapper.get("xml_content", "")
                     xml_content = re.sub(r"<w:tbl>.*?</w:tbl>", table_xml, xml_content)
+                    doubled_xml_content = double_spaces_in_preserve_text(xml_content)
                     
                     # 提取文本内容（处理多个根元素的情况）
                     try:
@@ -306,6 +294,41 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                     logger.error(f"存储样式信息到MongoDB失败: {e}", exc_info=True)
                     # 继续处理，不中断上传流程
 
+                # 生成预览用pdf文件，先生成临时docx文件，再转换成pdf
+                try:
+                    temp_fd, temp_docx_path = tempfile.mkstemp(suffix='.docx', prefix=f'table_{table_id}_')
+                    os.close(temp_fd)  # 关闭文件描述符，我们只需要路径
+                            
+                    # 创建DOCX文件
+                    success = create_docx_with_table_and_styles(
+                        xml_content,  # 表格XML
+                        table_style_info,  # 样式字典
+                        temp_docx_path
+                    )
+                            
+                    if success:
+                        logger.info(f"临时DOCX文件创建成功: table_id={table_id}, path={temp_docx_path}")
+                    else:
+                        temp_docx_path = None
+                        logger.warning(f"临时DOCX文件创建失败: table_id={table_id}")
+                        raise Exception("临时DOCX文件创建失败")
+
+                    script_command = f"{SOFFICE_PATH} --headless --convert-to pdf {temp_docx_path} --outdir {PDF_DIR_PATH}"
+                    result = _execute_script_subprocess(script_command)
+                    if result == "执行失败！":
+                        logger.error(f"libreoffice转换失败: table_id={table_id}, result={result}")
+                        raise Exception("libreoffice转换失败")
+                    else:
+                        logger.info(f"libreoffice转换成功: table_id={table_id}, result={result}")
+                        pdf_path = os.path.join(PDF_DIR_PATH, Path(temp_docx_path).name.replace(".docx", ".pdf"))
+                
+                except Exception as e:
+                    logger.error(f"创建预览用pdf文件失败: table_id={table_id}, error={e}", exc_info=True)
+                    temp_docx_path = None
+
+                if temp_docx_path and os.path.exists(temp_docx_path):
+                    os.unlink(temp_docx_path)
+
                 # 构建metadata结构
                 # 注意：ChromaDB metadata 只支持基本类型（str, int, float, bool, None）
                 # 样式信息已存储到MongoDB，metadata中存储table_id和mongo_id用于关联
@@ -315,6 +338,7 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                     "file_size": str(file_size),  # 确保是字符串类型
                     "table_index": str(table_index),  # 确保是字符串类型
                     "creation_time": creation_time,
+                    "pdf_path": pdf_path
                 }
                 
                 # 如果MongoDB插入成功，将mongo_id添加到metadata中
@@ -339,7 +363,7 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                         ids=[table_id],
                         embeddings=[embedding],
                         metadatas=[metadata],
-                        documents=[xml_content],
+                        documents=[doubled_xml_content],
                     )
                     logger.info(
                         f"表格存储成功: filename={file.filename}, table_id={table_id}, table_index={table_index}"
