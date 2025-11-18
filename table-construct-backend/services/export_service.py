@@ -160,6 +160,129 @@ def add_table_center_alignment(elem: etree.Element) -> None:
         add_table_center_alignment(child)
 
 
+def is_empty_paragraph(elem: etree.Element) -> bool:
+    """
+    检查段落是否为空（只包含格式信息，没有实际内容）
+    
+    Args:
+        elem: XML元素（段落）
+        
+    Returns:
+        如果段落为空返回True，否则返回False
+    """
+    namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+    
+    # 如果不是段落元素，返回False
+    if elem.tag != '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p':
+        return False
+    
+    # 检查是否有文本内容（包括run中的文本）
+    runs = elem.findall('w:r', namespaces)
+    for run in runs:
+        # 检查run中的文本
+        texts = run.findall('w:t', namespaces)
+        for text_elem in texts:
+            if text_elem.text and text_elem.text.strip():
+                return False
+        
+        # 检查run中是否有其他内容（如图片、对象等）
+        for child in run:
+            if child.tag not in [
+                '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t',
+                '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}rPr',
+                '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}br',
+                '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tab',
+            ]:
+                return False
+    
+    # 检查段落本身的文本
+    if elem.text and elem.text.strip():
+        return False
+    
+    # 检查是否有非格式的子元素（如表格、图片等）
+    for child in elem:
+        if child.tag not in [
+            '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pPr',
+            '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}r',
+        ]:
+            return False
+    
+    # 检查tail文本
+    if elem.tail and elem.tail.strip():
+        return False
+    
+    return True
+
+
+def is_section_break_paragraph(elem: etree.Element) -> bool:
+    """
+    检查段落是否包含分节符
+    
+    Args:
+        elem: XML元素（段落）
+        
+    Returns:
+        如果段落包含分节符返回True，否则返回False
+    """
+    namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+    
+    if elem.tag != '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p':
+        return False
+    
+    # 检查段落属性中是否有sectPr
+    p_pr = elem.find('w:pPr', namespaces)
+    if p_pr is not None:
+        sect_pr = p_pr.find('w:sectPr', namespaces)
+        if sect_pr is not None:
+            return True
+    
+    return False
+
+
+def remove_empty_paragraphs_after_section_breaks(elements: List[etree.Element]) -> List[etree.Element]:
+    """
+    删除分节符段落后面的空白段落（模拟按Delete键）
+    
+    Args:
+        elements: 元素列表
+        
+    Returns:
+        清理后的元素列表
+    """
+    if not elements:
+        return elements
+    
+    result = []
+    i = 0
+    
+    while i < len(elements):
+        elem = elements[i]
+        result.append(elem)
+        
+        # 如果当前元素是分节符段落
+        if is_section_break_paragraph(elem):
+            # 检查后面的元素是否是空白段落
+            j = i + 1
+            while j < len(elements):
+                next_elem = elements[j]
+                # 如果是空白段落，跳过（不添加到result）
+                if is_empty_paragraph(next_elem):
+                    j += 1
+                # 如果是另一个分节符段落，也跳过（避免重复分节符）
+                elif is_section_break_paragraph(next_elem):
+                    j += 1
+                else:
+                    # 遇到非空白段落，停止删除
+                    break
+            
+            # 更新索引
+            i = j
+        else:
+            i += 1
+    
+    return result
+
+
 def merge_document_xml(document_xml_list: List[str], insert_page_breaks: bool = True) -> str:
     """
     合并多个document.xml片段，中间插入下一页分节符
@@ -217,6 +340,9 @@ def merge_document_xml(document_xml_list: List[str], insert_page_breaks: bool = 
     # 如果没有元素，返回空字符串
     if not all_elements:
         return ""
+    
+    # 删除分节符段落后面的空白段落（模拟按Delete键）
+    all_elements = remove_empty_paragraphs_after_section_breaks(all_elements)
     
     # 转换为字符串（只返回元素内容，不包含body标签）
     result_parts = []
