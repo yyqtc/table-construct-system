@@ -645,7 +645,7 @@ export default {
       }
       
       // 拼接 PDF 访问 URL
-      return `http://localhost/table-pdf/${fileName}`
+      return `${process.env.VUE_APP_PDF_ROOT}/${fileName}`
     },
     getSelectedTablePdfUrl(tableItem) {
       if (!tableItem || !tableItem.metadata || !tableItem.metadata.pdf_path) {
