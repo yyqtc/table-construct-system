@@ -76,10 +76,15 @@ COZE_API_TOKEN = "your_coze_api_token"
 COZE_SUMMARY_TABLE_WORKFLOW_ID = "your_summary_table_workflow_id"
 COZE_EXTRACT_PARA_WORKFLOW_ID = "your_extract_para_workflow_id"
 
+# Coze API 检查表格配置
+COZE_CHECK_TABLE_API_TOKEN = "your_check_table_api_token"
+COZE_CHECK_TABLE_WORKFLOW_ID = "your_check_table_workflow_id"
+
 # MongoDB 配置
 MONGODB_URI = "your_mongodb_uri"
 MONGODB_DATABASE = "your_mongodb_database"
-MONGODB_COLLECTION = "your_mongodb_collection"
+MONGODB_STYLE_COLLECTION = "your_style_collection_name"
+MONGODB_CHECK_RESULT_COLLECTION = "your_check_result_collection_name"
 
 # PDF 配置
 SOFFICE_PATH = "your_soffice_path"

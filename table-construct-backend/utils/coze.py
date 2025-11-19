@@ -10,11 +10,13 @@ _backend_dir = Path(__file__).parent.parent
 if str(_backend_dir) not in sys.path:
     sys.path.insert(0, str(_backend_dir))
 
-from config import COZE_API_TOKEN
+from config import COZE_API_TOKEN, COZE_CHECK_TABLE_API_TOKEN
 
 coze_api_base = os.getenv("COZE_API_BASE") or COZE_CN_BASE_URL
 
 async_coze = AsyncCoze(auth=AsyncTokenAuth(token=COZE_API_TOKEN), base_url=coze_api_base)
+
+async_check_coze = AsyncCoze(auth=AsyncTokenAuth(token=COZE_CHECK_TABLE_API_TOKEN), base_url=coze_api_base)
 
 # xml_to_html_template = ChatPromptTemplate.from_messages([
 #     (

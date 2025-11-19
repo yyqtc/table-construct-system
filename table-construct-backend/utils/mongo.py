@@ -10,16 +10,18 @@ _backend_dir = Path(__file__).parent.parent
 if str(_backend_dir) not in sys.path:
     sys.path.insert(0, str(_backend_dir))
 
-from config import MONGODB_URI, MONGODB_DATABASE, MONGODB_COLLECTION
+from config import MONGODB_URI, MONGODB_DATABASE, MONGODB_STYLE_COLLECTION, MONGODB_CHECK_RESULT_COLLECTION
 
 client = MongoClient(MONGODB_URI, 27017)
 
 db = client[MONGODB_DATABASE]
 
-collection = db[MONGODB_COLLECTION]
+style_collection = db[MONGODB_STYLE_COLLECTION]
+
+check_result_collection = db[MONGODB_CHECK_RESULT_COLLECTION]
 
 if __name__ == "__main__":
-    result = collection.insert_one({
+    result = style_collection.insert_one({
         "table_id": "123",
         "filename": "test.docx",
         "table_index": 0,

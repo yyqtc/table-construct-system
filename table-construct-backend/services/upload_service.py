@@ -17,11 +17,11 @@ from pathlib import Path
 from docx import Document
 from docx.oxml.text.paragraph import CT_P
 from docx.text.paragraph import Paragraph
-from utils.mongo import collection as mongo_collection
+from utils.mongo import style_collection, check_result_collection
 
 from models import UploadResponse
 from database import get_collection, get_model
-from config import MAX_FILE_SIZE, COZE_SUMMARY_TABLE_WORKFLOW_ID, COZE_EXTRACT_PARA_WORKFLOW_ID, PDF_DIR_PATH, SOFFICE_PATH
+from config import MAX_FILE_SIZE, COZE_SUMMARY_TABLE_WORKFLOW_ID, COZE_EXTRACT_PARA_WORKFLOW_ID, COZE_CHECK_TABLE_WORKFLOW_ID, PDF_DIR_PATH, SOFFICE_PATH
 from utils.exceptions import HTTP_413_REQUEST_ENTITY_TOO_LARGE
 from utils.docx_utils import (
     extract_table_xml,
@@ -35,87 +35,55 @@ from utils.docx_utils import (
 )
 from utils.subproccess import _execute_script_subprocess
 
-from utils.coze import async_coze
+from utils.coze import async_coze, async_check_coze
 
 logger = logging.getLogger(__name__)
 
 
-async def upload_file(file: UploadFile) -> UploadResponse:
+async def process_tables_background(file_content: bytes, filename: str, file_size: int):
     """
-    处理文件上传
-
+    后台处理表格的异步函数
+    负责耗时的表格提取、Coze API调用、向量化、存储等操作
+    
     Args:
-        file: 上传的文件对象
-
-    Returns:
-        UploadResponse对象
+        file_content: 文件内容的字节数据
+        filename: 文件名
+        file_size: 文件大小
     """
     try:
-        logger.info(f"收到文件上传请求: filename={file.filename}")
-
+        logger.info(f"开始后台处理表格: filename={filename}")
+        
         collection = get_collection()
         model = get_model()
-
+        
         # 检查依赖是否初始化成功
         if collection is None or model is None:
-            logger.error("文件上传失败: 系统初始化失败，ChromaDB或向量模型未初始化")
-            return UploadResponse(
-                success=False,
-                message="系统初始化失败，请检查ChromaDB和向量模型",
-                data=None,
-            )
-
-        # 文件格式验证
-        if not file.filename:
-            logger.warning("文件上传失败: 文件名为空")
-            return UploadResponse(success=False, message="文件名不能为空", data=None)
-
-        if not file.filename.lower().endswith(".docx"):
-            logger.warning(f"文件上传失败: 不支持的文件格式 filename={file.filename}")
-            return UploadResponse(
-                success=False, message="只支持.docx格式的文件", data=None
-            )
-
-        # 读取文件内容到内存
-        file_content = await file.read()
-        file_size = len(file_content)
-        logger.info(f"文件读取成功: filename={file.filename}, size={file_size} bytes")
-
-        # 文件大小限制
-        if file_size > MAX_FILE_SIZE:
-            logger.warning(
-                f"文件上传失败: 文件大小超过限制 filename={file.filename}, size={file_size} bytes"
-            )
-            raise HTTPException(
-                status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"文件大小超过限制（最大50MB），当前文件大小：{file_size / (1024 * 1024):.2f}MB",
-            )
-
+            logger.error("后台处理失败: 系统初始化失败，ChromaDB或向量模型未初始化")
+            return
+        
         # 使用BytesIO将文件内容转换为文件对象
         file_stream = BytesIO(file_content)
-
+        
         # 解析DOCX文件
         try:
             doc = Document(file_stream)
-            logger.info(f"DOCX文件解析成功: filename={file.filename}")
+            logger.info(f"DOCX文件解析成功: filename={filename}")
         except Exception as e:
             logger.error(
-                f"DOCX文件解析失败: filename={file.filename}, error={e}", exc_info=True
+                f"DOCX文件解析失败: filename={filename}, error={e}", exc_info=True
             )
-            return UploadResponse(
-                success=False, message=f"DOCX文件解析失败: {str(e)}", data=None
-            )
-
+            return
+        
         styles_xml = get_styles_xml_from_docx_stream(file_stream)
         
         # 提取所有表格
         tables = doc.tables
         if not tables:
-            logger.warning(f"文件上传失败: 文档中未找到表格 filename={file.filename}")
-            return UploadResponse(success=False, message="文档中未找到表格", data=None)
-
-        logger.info(f"文档中找到{len(tables)}个表格: filename={file.filename}")
-
+            logger.warning(f"文档中未找到表格: filename={filename}")
+            return
+        
+        logger.info(f"文档中找到{len(tables)}个表格: filename={filename}")
+        
         # 处理每个表格
         uploaded_tables = []
         for table_index, table in enumerate(tables):
@@ -142,7 +110,7 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                                 para_objs_before.append(para)
                             else:
                                 paragraphs_after_objs.append(para)
-                                if len(paragraphs_after_objs) >= 1:
+                                if len(paragraphs_after_objs) >= 3:
                                     break
 
                 paragraphs_before_objs = (
@@ -181,6 +149,22 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                     para_extract_wrapper = json.loads(para_extract_wrapper.data)
                     xml_content = para_extract_wrapper.get("xml_content", "")
                     xml_content = re.sub(r"<w:tbl>.*?</w:tbl>", table_xml, xml_content)
+
+                    check_table_wrapper = await async_check_coze.workflows.runs.create(
+                        workflow_id=COZE_CHECK_TABLE_WORKFLOW_ID,
+                        parameters={
+                            "xml_content": xml_content,
+                            "table_summary": table_summary,
+                            "bit1": 0
+                        }
+                    )
+                    check_table_wrapper = json.loads(check_table_wrapper.data)
+                    logger.info(f"表格检查结果: {check_table_wrapper}")
+                    check_table_output = check_table_wrapper.get("output", "")
+                    check_table_reasoning = check_table_wrapper.get("reasoning_content", "")
+                    logger.info(f"表格检查结果: {check_table_output}")
+                    logger.info(f"表格检查推理过程: {check_table_reasoning}")
+
                     doubled_xml_content = double_spaces_in_preserve_text(xml_content)
                     
                     # 提取文本内容（处理多个根元素的情况）
@@ -275,26 +259,46 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                 creation_time = datetime.now().isoformat()
 
                 # 将样式信息存储到MongoDB
-                mongo_id = None
+                mongo_style_id = None
                 try:
-                    if mongo_collection is not None:
+                    if style_collection is not None:
                         style_document = {
                             "table_id": table_id,
-                            "filename": file.filename,
+                            "filename": filename,
                             "table_index": table_index,
                             "styles": table_style_info,  # 存储所有样式XML
-                            "creation_time": creation_time,
+                            "creation_time": creation_time
                         }
-                        result = mongo_collection.insert_one(style_document)
-                        mongo_id = str(result.inserted_id)
-                        logger.info(f"样式信息已存储到MongoDB: table_id={table_id}, mongo_id={mongo_id}")
+                        result = style_collection.insert_one(style_document)
+                        mongo_style_id = str(result.inserted_id)
+                        logger.info(f"样式信息已存储到MongoDB: table_id={table_id}, mongo_style_id={mongo_style_id}")
                     else:
                         logger.warning("MongoDB collection未初始化，跳过样式信息存储")
                 except Exception as e:
                     logger.error(f"存储样式信息到MongoDB失败: {e}", exc_info=True)
                     # 继续处理，不中断上传流程
 
+                # 将检查结果存储到MongoDB
+                mongo_check_result_id = None
+                try:
+                    if check_result_collection is not None:
+                        check_result_document = {
+                            "table_id": table_id,
+                            "output": check_table_output,
+                            "reasoning": check_table_reasoning,
+                            "creation_time": creation_time
+                        }
+                        result = check_result_collection.insert_one(check_result_document)
+                        mongo_check_result_id = str(result.inserted_id)
+                        logger.info(f"检查结果已存储到MongoDB: table_id={table_id}, mongo_check_result_id={mongo_check_result_id}")
+                    else:
+                        logger.warning("MongoDB check_result_collection未初始化，跳过检查结果存储")
+                except Exception as e:
+                    logger.error(f"存储检查结果到MongoDB失败: {e}", exc_info=True)
+                    # 继续处理，不中断上传流程
+
                 # 生成预览用pdf文件，先生成临时docx文件，再转换成pdf
+                pdf_path = None
                 try:
                     temp_fd, temp_docx_path = tempfile.mkstemp(suffix='.docx', prefix=f'table_{table_id}_')
                     os.close(temp_fd)  # 关闭文件描述符，我们只需要路径
@@ -331,31 +335,34 @@ async def upload_file(file: UploadFile) -> UploadResponse:
 
                 # 构建metadata结构
                 # 注意：ChromaDB metadata 只支持基本类型（str, int, float, bool, None）
-                # 样式信息已存储到MongoDB，metadata中存储table_id和mongo_id用于关联
+                # 样式信息已存储到MongoDB，metadata中存储table_id和mongo_style_id用于关联
                 metadata = {
                     "table_id": table_id,
-                    "filename": file.filename,
+                    "filename": filename,
                     "file_size": str(file_size),  # 确保是字符串类型
                     "table_index": str(table_index),  # 确保是字符串类型
                     "creation_time": creation_time,
-                    "pdf_path": pdf_path
                 }
                 
-                # 如果MongoDB插入成功，将mongo_id添加到metadata中
-                if mongo_id:
-                    metadata["mongo_id"] = mongo_id
+                if pdf_path:
+                    metadata["pdf_path"] = pdf_path
+                
+                # 如果MongoDB插入成功，将mongo_style_id添加到metadata中
+                if mongo_style_id:
+                    metadata["mongo_style_id"] = mongo_style_id
+
+                if mongo_check_result_id:
+                    metadata["mongo_check_result_id"] = mongo_check_result_id
 
                 # 向量化文本内容
                 try:
                     embedding = model.encode(text_content).tolist()
                 except Exception as e:
                     logger.error(
-                        f"文本向量化失败: filename={file.filename}, table_index={table_index}, error={e}",
+                        f"文本向量化失败: filename={filename}, table_index={table_index}, error={e}",
                         exc_info=True,
                     )
-                    return UploadResponse(
-                        success=False, message=f"文本向量化失败: {str(e)}", data=None
-                    )
+                    continue
 
                 # 存入ChromaDB
                 try:
@@ -366,16 +373,14 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                         documents=[doubled_xml_content],
                     )
                     logger.info(
-                        f"表格存储成功: filename={file.filename}, table_id={table_id}, table_index={table_index}"
+                        f"表格存储成功: filename={filename}, table_id={table_id}, table_index={table_index}"
                     )
                 except Exception as e:
                     logger.error(
-                        f"ChromaDB存储失败: filename={file.filename}, table_index={table_index}, error={e}",
+                        f"ChromaDB存储失败: filename={filename}, table_index={table_index}, error={e}",
                         exc_info=True,
                     )
-                    return UploadResponse(
-                        success=False, message=f"ChromaDB存储失败: {str(e)}", data=None
-                    )
+                    continue
 
                 uploaded_tables.append(
                     {
@@ -387,27 +392,99 @@ async def upload_file(file: UploadFile) -> UploadResponse:
 
             except Exception as e:
                 logger.error(
-                    f"处理表格失败: filename={file.filename}, table_index={table_index}, error={e}",
+                    f"处理表格失败: filename={filename}, table_index={table_index}, error={e}",
                     exc_info=True,
                 )
                 # 继续处理下一个表格，不中断整个上传过程
                 continue
 
         if not uploaded_tables:
-            logger.error(f"文件上传失败: 所有表格处理失败 filename={file.filename}")
-            return UploadResponse(success=False, message="所有表格处理失败", data=None)
-
-        logger.info(
-            f"文件上传成功: filename={file.filename}, tables_count={len(uploaded_tables)}"
+            logger.error(f"后台处理失败: 所有表格处理失败 filename={filename}")
+        else:
+            logger.info(
+                f"后台处理成功: filename={filename}, tables_count={len(uploaded_tables)}"
+            )
+            
+    except Exception as e:
+        logger.error(
+            f"后台处理表格失败: filename={filename}, error={e}",
+            exc_info=True,
         )
+
+
+async def upload_file(file_content: bytes, filename: str, file_size: int = None) -> UploadResponse:
+    """
+    处理文件上传（快速验证版本）
+
+    Args:
+        file_content: 文件内容的字节数据
+        filename: 文件名
+        file_size: 文件大小（可选，如果不提供则从file_content计算）
+
+    Returns:
+        UploadResponse对象
+    """
+    try:
+        if file_size is None:
+            file_size = len(file_content)
+            
+        logger.info(f"收到文件上传请求: filename={filename}")
+
+        # 文件格式验证
+        if not filename:
+            logger.warning("文件上传失败: 文件名为空")
+            return UploadResponse(success=False, message="文件名不能为空", data=None)
+
+        if not filename.lower().endswith(".docx"):
+            logger.warning(f"文件上传失败: 不支持的文件格式 filename={filename}")
+            return UploadResponse(
+                success=False, message="只支持.docx格式的文件", data=None
+            )
+
+        logger.info(f"文件读取成功: filename={filename}, size={file_size} bytes")
+
+        # 文件大小限制
+        if file_size > MAX_FILE_SIZE:
+            logger.warning(
+                f"文件上传失败: 文件大小超过限制 filename={filename}, size={file_size} bytes"
+            )
+            raise HTTPException(
+                status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"文件大小超过限制（最大50MB），当前文件大小：{file_size / (1024 * 1024):.2f}MB",
+            )
+
+        # 使用BytesIO将文件内容转换为文件对象（用于快速验证）
+        file_stream = BytesIO(file_content)
+
+        # 解析DOCX文件（快速验证）
+        try:
+            doc = Document(file_stream)
+            logger.info(f"DOCX文件解析成功: filename={filename}")
+        except Exception as e:
+            logger.error(
+                f"DOCX文件解析失败: filename={filename}, error={e}", exc_info=True
+            )
+            return UploadResponse(
+                success=False, message=f"DOCX文件解析失败: {str(e)}", data=None
+            )
+
+        # 快速检查是否有表格
+        tables = doc.tables
+        if not tables:
+            logger.warning(f"文档中未找到表格: filename={filename}")
+            return UploadResponse(success=False, message="文档中未找到表格", data=None)
+
+        tables_count = len(tables)
+        logger.info(f"文档中找到{tables_count}个表格: filename={filename}")
+
+        # 立即返回响应，表格处理在后台进行
         return UploadResponse(
             success=True,
-            message=f"成功上传文件，处理了{len(uploaded_tables)}个表格",
+            message=f"文件已接收，正在后台处理{tables_count}个表格",
             data={
-                "filename": file.filename,
+                "filename": filename,
                 "file_size": file_size,
-                "tables_count": len(uploaded_tables),
-                "uploaded_tables": uploaded_tables,
+                "tables_count": tables_count,
             },
         )
 
@@ -416,7 +493,7 @@ async def upload_file(file: UploadFile) -> UploadResponse:
         raise
     except Exception as e:
         logger.error(
-            f"文件上传失败: filename={file.filename if hasattr(file, 'filename') else 'unknown'}, error={e}",
+            f"文件上传失败: filename={filename if 'filename' in locals() else 'unknown'}, error={e}",
             exc_info=True,
         )
         return UploadResponse(

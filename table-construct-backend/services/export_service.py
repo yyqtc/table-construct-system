@@ -14,7 +14,7 @@ from lxml import etree
 from docx import Document
 
 from database import get_collection
-from utils.mongo import collection as mongo_collection
+from utils.mongo import style_collection, check_result_collection
 from utils.exceptions import (
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
@@ -423,10 +423,10 @@ async def export_docx(
 
         # 从MongoDB批量查询样式信息
         styles_map = {}
-        if mongo_collection is not None:
+        if style_collection is not None:
             try:
                 # 使用table_id集合查询MongoDB
-                mongo_results = mongo_collection.find({"table_id": {"$in": unique_table_ids}})
+                mongo_results = style_collection.find({"table_id": {"$in": unique_table_ids}})
                 for doc in mongo_results:
                     table_id = doc.get("table_id")
                     styles = doc.get("styles", {})
