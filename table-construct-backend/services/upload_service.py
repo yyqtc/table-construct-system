@@ -150,11 +150,19 @@ async def process_tables_background(file_content: bytes, filename: str, file_siz
                     xml_content = para_extract_wrapper.get("xml_content", "")
                     xml_content = re.sub(r"<w:tbl>.*?</w:tbl>", table_xml, xml_content)
 
+                    wrapped_xml_content = f"""
+                    <w:body>
+                    {xml_content}
+                    </w:body>
+                    """
+                    wrapped_xml_tree = ET.fromstring(wrapped_xml_content)
+                    wrapped_xml_text = ','.join([text.strip() for text in wrapped_xml_tree.itertext()])
+
                     check_table_wrapper = await async_check_coze.workflows.runs.create(
                         workflow_id=COZE_CHECK_TABLE_WORKFLOW_ID,
                         parameters={
-                            "xml_content": xml_content,
-                            "table_summary": table_summary,
+                            "xml_content": wrapped_xml_tree,
+                            "table_summary": wrapped_xml_text,
                             "bit1": 0
                         }
                     )
