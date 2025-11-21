@@ -1,4 +1,4 @@
-from cozepy import COZE_CN_BASE_URL, AsyncCoze, AsyncTokenAuth, Coze, TokenAuth
+from cozepy import COZE_CN_BASE_URL, AsyncCoze, AsyncTokenAuth
 
 import os
 import sys

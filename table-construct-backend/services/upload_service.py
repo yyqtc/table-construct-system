@@ -8,8 +8,9 @@ import logging
 import uuid
 import json
 import re
-import xml.etree.ElementTree as ET
+import time
 
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from io import BytesIO
 from fastapi import UploadFile, HTTPException
@@ -150,23 +151,54 @@ async def process_tables_background(file_content: bytes, filename: str, file_siz
                     xml_content = para_extract_wrapper.get("xml_content", "")
                     xml_content = re.sub(r"<w:tbl>.*?</w:tbl>", table_xml, xml_content)
 
+                    # 添加Word文档的命名空间声明，避免"unbound prefix"错误
                     wrapped_xml_content = f"""
-                    <w:body>
+                    <w:body xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
                     {xml_content}
-                    </w:body>
-                    """
+                    </w:body>"""
                     wrapped_xml_tree = ET.fromstring(wrapped_xml_content)
                     wrapped_xml_text = ','.join([text.strip() for text in wrapped_xml_tree.itertext()])
 
                     check_table_wrapper = await async_check_coze.workflows.runs.create(
                         workflow_id=COZE_CHECK_TABLE_WORKFLOW_ID,
                         parameters={
-                            "xml_content": wrapped_xml_tree,
+                            "xml_content": wrapped_xml_content,
                             "table_summary": wrapped_xml_text,
                             "bit1": 0
-                        }
+                        },
+                        is_async=True
                     )
-                    check_table_wrapper = json.loads(check_table_wrapper.data)
+                    check_table_execute_id = check_table_wrapper.execute_id
+                    run_error_times = 0
+                    check_table_wrapper = {
+                        "output": None,
+                        "reasoning_content": None
+                    }
+                    while True:
+                        check_table_task = await async_check_coze.workflows.runs.run_histories.retrieve(
+                            workflow_id=COZE_CHECK_TABLE_WORKFLOW_ID,
+                            execute_id=check_table_execute_id
+                        )
+                        if check_table_task.error_code != 0:
+                            if run_error_times > 2:
+                                break
+
+                            run_error_times += 1
+                            time.sleep(10)
+                            continue
+                        else:
+                            if check_table_task.execute_status == "Success":
+                                check_table_task_output_wrapper = json.loads(check_table_task.output)
+                                check_table_task_output = json.loads(check_table_task_output_wrapper.get("Output", ""))
+                                check_table_wrapper = check_table_task_output.get("data", {
+                                    "output": None,
+                                    "reasoning_content": None
+                                })
+                                break
+                            else:
+                                time.sleep(10)
+                                continue
+
                     logger.info(f"表格检查结果: {check_table_wrapper}")
                     check_table_output = check_table_wrapper.get("output", "")
                     check_table_reasoning = check_table_wrapper.get("reasoning_content", "")
@@ -182,8 +214,8 @@ async def process_tables_background(file_content: bytes, filename: str, file_siz
                         text_content = ','.join([text.strip() for text in table_xml_content.itertext()])
                     except ET.ParseError:
                         # 如果包含多个根元素，使用XML片段解析
-                        # 将多个根元素包装在一个临时根元素中
-                        wrapped_xml = f"<root>{xml_content}</root>"
+                        # 将多个根元素包装在一个临时根元素中，添加命名空间声明
+                        wrapped_xml = f'<root xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{xml_content}</root>'
                         try:
                             wrapped_tree = ET.fromstring(wrapped_xml)
                             text_content = ','.join([text.strip() for text in wrapped_tree.itertext()])
